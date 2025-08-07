@@ -113,7 +113,7 @@ int main(int argc, char **argv)
         graph.random_walk(&walker_conf, &tr_conf, &walk_conf);
         double sum_time = walk_timer.duration();
         double walk_time = sum_time - graph.other_time;
-        // printf("[p%u][sum time:]%lf [walk time:]%lf [other time:]%lf\n", graph.get_local_partition_id(), sum_time, walk_time, graph.other_time);
+        printf("[p%u][sum time:]%lf [walk time:]%lf [other time:]%lf\n", graph.get_local_partition_id(), sum_time, walk_time, graph.other_time);
     }
     printf("> [p%d RANDOM WALKING TIME:] %lf \n",get_mpi_rank(), timer.duration());
 

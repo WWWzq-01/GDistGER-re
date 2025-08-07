@@ -67,8 +67,8 @@ struct PathSet
     void dump(const char* output_path, const char* fopen_mode, bool with_head_info ,std::vector<vertex_id_t> &vec,corpus_t &local_corpus,std::vector<int>&vertex_cn,CoOccorCsr* cocsr)
     {
         Timer timer;
-        FILE* f = fopen(output_path,fopen_mode);
-        assert(f != NULL);
+        // FILE* f = fopen(output_path,fopen_mode);
+        // assert(f != NULL);
         
         size_t null_sen = 0;
         for (int worker_idx = 0; worker_idx < seg_num; worker_idx++)
@@ -81,7 +81,7 @@ struct PathSet
                 {
 
                     vec[*(path_begin[worker_idx][walker_idx] + p_i)]++;
-                    fprintf(f, " %u", *(path_begin[worker_idx][walker_idx] + p_i));
+                    // fprintf(f, " %u", *(path_begin[worker_idx][walker_idx] + p_i));
                     // tmp_path.push_back(*(path_begin[worker_idx][walker_idx] + p_i));
 
                     vertex_cn[*(path_begin[worker_idx][walker_idx] + p_i)]++;
@@ -90,12 +90,12 @@ struct PathSet
 
                 }
                 if(path_length[worker_idx][walker_idx]!=0){
-                    fprintf(f, "\n");
+                    // fprintf(f, "\n");
                     local_corpus.push_back(seq);
                 }
             }
         }
-        fclose(f);
+        // fclose(f);
         printf("p%d null sen: %zu\n",get_mpi_rank(),null_sen);
 #ifndef UNIT_TEST
         printf("[p%d] finish write path data in %lf seconds \n",get_mpi_rank(), timer.duration());
@@ -110,6 +110,7 @@ class PathCollector
     // node_buffer
     std::vector<MessageBuffer*> node_local_fp;
     std::mutex node_local_fp_lock;
+    // fp: footprint
     MessageBuffer** thread_local_fp;
 public:
     PathCollector(int worker_num_param)
@@ -160,6 +161,7 @@ public:
     PathSet* assemble_path(walker_id_t walker_begin)
     {
         Timer timer;
+        // collect all footprints
         for (int w_i = 0; w_i < worker_num; w_i++)
         {
             if (this->thread_local_fp[w_i] != nullptr)
@@ -174,7 +176,7 @@ public:
         
         auto get_walker_partition_id = [&] (walker_id_t walker)
         {
-            return walker % partition_num;
+            return walker % partition_num; // Simple hash partitioning
         };
 
         size_t send_fp_num[partition_num];

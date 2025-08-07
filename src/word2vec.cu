@@ -38,7 +38,7 @@ using std::endl;
 #define MAX_CODE_LENGTH 40
 
 #define EVALUATION_NEIGHBOUR_NUM 30
-#define NODE_TRAINING_CONVERGE_THRESHOLD 0.4
+#define NODE_TRAINING_CONVERGE_THRESHOLD 0.2
 #define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.7
 
 #define MAX_SENTENCE 15000
@@ -968,6 +968,10 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
                  d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
                 break;
       case 300: __sgNegReuse<300><<<gDim, bDimNeg>>>
+                (window, layer1_size, negative, vocab_size, alpha,
+                 d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
+                break;
+      case 128: __sgNegReuse<128><<<gDim, bDimNeg>>>
                 (window, layer1_size, negative, vocab_size, alpha,
                  d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
                 break;
