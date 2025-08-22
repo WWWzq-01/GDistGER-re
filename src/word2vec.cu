@@ -1021,6 +1021,8 @@ void all_sync(){
 
 }
 double sync_spend_time = 0.0f;
+double actual_training_time = 0.0;
+double total_file_read_time = 0.0;
 void sync_embedding_func()
 {
   Timer sync_timer;
@@ -1139,6 +1141,10 @@ void TrainModelThread(string data_path)
 
   clock_t now;
   strcpy(train_file,data_path.c_str());
+  
+  Timer file_read_timer;
+  printf("[ %d ] Starting file read: %s\n", my_rank, train_file);
+  
   FILE *fi = fopen(train_file, "r");
   if(fi == nullptr) {
     printf("open [%s] fail\n",data_path.c_str());
@@ -1249,6 +1255,10 @@ void TrainModelThread(string data_path)
   cudaDeviceSynchronize();
   checkCUDAerr(cudaMemcpy(syn0, d_syn0, vocab_size * layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
 
+  double file_read_time = file_read_timer.duration();
+  total_file_read_time += file_read_time;
+  printf("[ %d ] File read completed in %lf seconds (total: %lf)\n", my_rank, file_read_time, total_file_read_time);
+  
   fclose(fi);
 
   // free memory
@@ -1653,6 +1663,8 @@ int ArgPos(char *str, int argc, char **argv) {
 }
 int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer* csr) 
 {
+  Timer actual_training_timer;
+  printf("[ %d ] Starting actual training execution...\n", _my_rank);
 
   char hostname[MPI_MAX_PROCESSOR_NAME];
   int hostname_len;
@@ -1830,6 +1842,8 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   cudaFree(d_expTable);
   free(last_emb);
   
+  actual_training_time = actual_training_timer.duration();
+  printf("[ %d ] Training execution completed. Actual training time: %lf seconds\n", _my_rank, actual_training_time);
 
   return 0;
 }
