@@ -413,6 +413,10 @@ public:
     vertex_id_t init_round = 5;
     SyncQueue out_queue;
     
+    // Compression statistics
+    size_t saved_origin_size = 0;
+    size_t saved_theory_compress_size = 0;
+    
     void get_new_sort()
     {
         
@@ -706,9 +710,14 @@ public:
                     cv.wait(lock,[]{return !hasResource;});
                     // if hasResource = true, then block the walking
                     hasResource = true;
-                    this->out_queue.push(local_output_path);
+                    size_t corpus_size = this->local_corpus.size();  // Save size before move
+                    
+                    // Calculate compression statistics before move
+                    this->calculateCompressionStats();
+                    
+                    this->out_queue.push(std::move(this->local_corpus));  // Use move semantics to avoid copying
                     cv.notify_one();
-                    cout<< get_mpi_rank()<<"  =========== [ PUSH " << local_output_path <<"]======" <<endl;
+                    cout<< get_mpi_rank()<<"  =========== [ PUSH CORPUS DATA (size: " << corpus_size << ")]======" <<endl;
                     
                     MPI_Allreduce(context_map_freq.data(),  this->vertex_freq, this->v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
                     uint64_t words_sum = 0;
@@ -1061,6 +1070,33 @@ public:
                 active_walker_num >= PHASED_EXECTION_THRESHOLD * this->partition_num
             );
             this->msg_time += msg_timer.duration();
+        }
+    }
+    
+    void calculateCompressionStats() {
+        // Calculate original size
+        saved_origin_size = 0;
+        for(size_t i = 0; i < local_corpus.size(); i++) {
+            saved_origin_size += local_corpus[i].size();
+        }
+        
+        // Calculate theoretical compression size
+        saved_theory_compress_size = 0;
+        for(size_t i = 0; i < local_corpus.size(); i++) {
+            saved_theory_compress_size += local_corpus[i].size();
+            map<vertex_id_t,int> freq;
+            for(size_t j = 1; j < local_corpus[i].size(); j++) {
+                freq[local_corpus[i][j]]++;
+            }
+            vector<pair<vertex_id_t,int>> core_array;
+            for(auto& pair: freq) {
+                core_array.push_back(pair);
+            }
+            sort(core_array.begin(), core_array.end(), [](pair<vertex_id_t, int>&p1, pair<vertex_id_t,int>&p2) {
+                return p1.second > p2.second;
+            });
+            if(core_array.size() > 0) saved_theory_compress_size -= core_array[0].second;
+            if(core_array.size() > 1) saved_theory_compress_size -= core_array[1].second;
         }
     }
 };

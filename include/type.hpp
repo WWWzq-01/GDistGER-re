@@ -31,21 +31,21 @@ struct EmptyData
 class SyncQueue
 {
 private:
-   queue<string> base_queue;
+   queue<corpus_t> base_queue;  // Changed to directly store corpus data
    mutex mutx; 
    bool isClose ;
 public:
     SyncQueue(){
         this->isClose = false;
     }
-    void push(string iterm){
+    void push(corpus_t&& corpus_data){  // Accept rvalue reference for move semantics
         mutx.lock();
-        base_queue.push(iterm);
+        base_queue.push(std::move(corpus_data));
         mutx.unlock();
     }
-    string pop() {
+    corpus_t pop() {
         mutx.lock();
-        string top = base_queue.front();
+        corpus_t top = base_queue.front();
         base_queue.pop();
         mutx.unlock();
         return top;

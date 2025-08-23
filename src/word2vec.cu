@@ -1116,6 +1116,7 @@ void sync_embedding_func()
 }
 
 LR *lr_scheduler;
+void TrainModelThreadMemory(const corpus_t& corpus_data);  // Declaration for memory-based training
 void TrainModelThread(string data_path)
 {
   printf("[ p%d ]=====================Train file %s============\n",my_rank,data_path.c_str());
@@ -1269,6 +1270,112 @@ void TrainModelThread(string data_path)
   cudaFree(d_sent_len);
   cudaFree(d_negSample);
 }
+
+// New function to train directly with memory corpus data (no disk I/O)
+void TrainModelThreadMemory(const corpus_t& corpus_data)
+{
+  printf("[ p%d ]=====================Train memory corpus (size: %zu)============\n", my_rank, corpus_data.size());
+  long long word, word_count = 0, last_word_count = 0;
+  long long local_iter = iter;
+
+  // use in kernel
+  int total_sent_len, reduSize = 32;
+  int *sen, *sentence_length, *d_sen, *d_sent_len;
+  sen = (int *)malloc(MAX_SENTENCE * 100 * sizeof(int));
+  sentence_length = (int *)malloc((MAX_SENTENCE + 1) * sizeof(int));
+
+  checkCUDAerr(cudaMalloc((void **)&d_sen, MAX_SENTENCE * 100 * sizeof(int)));
+  checkCUDAerr(cudaMalloc((void **)&d_sent_len, (MAX_SENTENCE + 1) * sizeof(int)));
+
+  int *negSample = (int *)malloc(MAX_SENTENCE * negative * sizeof(int));
+  int *d_negSample;
+  checkCUDAerr(cudaMalloc(&d_negSample, MAX_SENTENCE * negative * sizeof(int)));
+
+  while (reduSize < layer1_size) {
+    reduSize *= 2;
+  }
+
+  clock_t now;
+  start = clock();
+
+  // Process corpus data directly from memory instead of reading from file
+  size_t corpus_index = 0;
+  
+  while (corpus_index < corpus_data.size()) {
+    if (word_count - last_word_count > 10000) {
+      word_count_actual += word_count - last_word_count;
+      last_word_count = word_count;
+      if ((debug_mode > 1)) {
+        now = clock();
+        printf("%cAlpha: %f  Words/sec: %.2fk  ", 13, alpha,
+            word_count_actual / ((float)(now - start + 1) / (float)CLOCKS_PER_SEC * 1000));
+        fflush(stdout);
+      }
+    }
+    
+    total_sent_len = 0;
+    sentence_length[0] = 0;
+    int cnt_sentence = 0;
+
+    // Process sentences from memory corpus
+    while (cnt_sentence < MAX_SENTENCE && corpus_index < corpus_data.size()) {
+      const auto& sequence = corpus_data[corpus_index];
+      int temp_sent_len = 0;
+      
+      for (auto vertex_id : sequence) {
+        word = id2offset[vertex_id];  // Convert vertex ID to vocab index
+        if (word == -1) continue;
+        word_count++;
+        if (word == 0) break;  // End of sentence
+        
+        if (sample > 0) {
+          float ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
+          int next_random_t = rand();
+          if (ran < (next_random_t & 0xFFFF) / (float)65536) continue;
+        }
+        sen[total_sent_len] = word;
+        total_sent_len++;
+        temp_sent_len++;
+        if (temp_sent_len >= MAX_SENTENCE_LENGTH) break;
+      }
+      
+      sentence_length[cnt_sentence] = temp_sent_len;
+      cnt_sentence++;
+      corpus_index++;
+      if (total_sent_len > MAX_SENTENCE * 100 - MAX_SENTENCE_LENGTH) break;
+    }
+
+    if (cnt_sentence == 0) break;
+
+    // Generate negative samples
+    for (int i = 0; i < cnt_sentence * negative; i++) {
+      negSample[i] = table[rand() % table_size];
+      if (negSample[i] == 0) negSample[i] = rand() % (vocab_size - 1) + 1;
+    }
+
+    // Copy data to GPU and run training
+    checkCUDAerr(cudaMemcpy(d_sen, sen, total_sent_len * sizeof(int), cudaMemcpyHostToDevice));
+    checkCUDAerr(cudaMemcpy(d_sent_len, sentence_length, cnt_sentence * sizeof(int), cudaMemcpyHostToDevice));
+    checkCUDAerr(cudaMemcpy(d_negSample, negSample, cnt_sentence * negative * sizeof(int), cudaMemcpyHostToDevice));
+
+    if (cbow) {
+      cbowKernel(d_sen, d_sent_len, alpha, cnt_sentence, reduSize);
+    } else {
+      sgKernel(d_sen, d_sent_len, d_negSample, alpha, cnt_sentence, reduSize);
+    }
+  }
+  cudaDeviceSynchronize();
+  checkCUDAerr(cudaMemcpy(syn0, d_syn0, vocab_size * layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
+
+  // free memory
+  free(sen);
+  free(sentence_length);
+  free(negSample);
+  cudaFree(d_sen);
+  cudaFree(d_sent_len);
+  cudaFree(d_negSample);
+}
+
 vector<vertex_id_t> g_v_degree;
 
 void myIntersectition(const vector<vertex_id_t>& v1,const vector<vertex_id_t>& v2,vector<vertex_id_t>& v_intersection)
@@ -1515,25 +1622,25 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     // 等待游走产生训练资料
     unique_lock<mutex> lock(mtx);
     cv.wait(lock,[]{return hasResource;});
-    string task_str = taskq.pop();
+    corpus_t corpus_data = taskq.pop();  // Get corpus data directly instead of file path
     // 此时可以sample下一轮了
     hasResource = false; // 坑位被释放
     cv.notify_one();
-    cout << "====== POP " << task_str <<" ===" << endl;
+    cout << "====== POP CORPUS DATA (size: " << corpus_data.size() << ") ===" << endl;
     train_iter++;
     alpha = lr_scheduler->get_lr();
     pause_sync = false;
     //MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
-    printf("[ %d ] train %s start\n",my_rank,task_str.c_str());
-    TrainModelThread(task_str);
-    printf("[ %d ] train %s finished\n",my_rank,task_str.c_str());
+    printf("[ %d ] train corpus data start\n",my_rank);
+    TrainModelThreadMemory(corpus_data);  // New function to train with memory data
+    printf("[ %d ] train corpus data finished\n",my_rank);
     //MPI_Barrier(MPI_EMB_COMM);
     // pause_sync = true;
     std::cout << std::endl;
     train_spend_time += train_timer.duration();
     Timer eva_timer;
     vertex_id_t eva_num = 0;
-    printf("[ %d ] evaluation %s start\n",my_rank,task_str.c_str());
+    printf("[ %d ] evaluation start\n",my_rank);
     for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
       if(vertex_walker_stop_flag[v]== 0 ){
         float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
@@ -1543,7 +1650,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
         }
       }
     }
-    printf("[ %d ] evaluation %s finished\n",my_rank,task_str.c_str());
+    printf("[ %d ] evaluation finished\n",my_rank);
     
     printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
     MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
@@ -1586,7 +1693,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
   fo = fopen(output_file, "wb");
-  if(fo == NULL) printf("[ %d ] [%s] open fail\n",output_file);
+  if(fo == NULL) printf("[ %d ] [%s] open fail\n", my_rank, output_file);
   if (classes == 0) {	
     // Save the word vectors
     fprintf(fo, "%lld %lld\n", vocab_size, layer1_size);

@@ -16,10 +16,6 @@
 using namespace std;
 int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer *csr);
 extern double actual_training_time;
-extern double total_file_read_time;
-
-// Definition of global variable for disk write time
-double total_disk_write_time = 0.0;
 
 struct Empty
 {
@@ -150,9 +146,9 @@ int main(int argc, char **argv)
         printf("[p%u][WALK EXECUTION] Total: %lf s, Pure walk: %lf s, Other: %lf s\n", 
                graph.get_local_partition_id(), sum_time, walk_time, graph.other_time);
         
-        // 如果设置了输出路径，这里应该包含了写入磁盘的时间
+        // 使用内存管道，无磁盘I/O
         if (!opt.output_path.empty()) {
-            printf("[ %d ] *** DISK I/O TIME INCLUDED IN WALK TIME *** \n", my_rank);
+            printf("[ %d ] *** USING MEMORY PIPELINE (NO DISK I/O) *** \n", my_rank);
         }
     }
     printf("> [p%d RANDOM WALKING TIME:] %lf \n",get_mpi_rank(), timer.duration());
@@ -185,13 +181,8 @@ int main(int argc, char **argv)
     corpus_compression_time = compression_timer.duration();
     printf("[ %d ] Corpus compression completed in %lf seconds\n", my_rank, corpus_compression_time);
 
-    size_t origin_size = 0;
-    for(size_t i = 0; i < graph.local_corpus.size();i++){
-        origin_size += graph.local_corpus[i].size();
-    }
-    origin_size *= sizeof(vertex_id_t);
-
-    // cout << "original size: " << origin_size << " Byte." << endl;
+    // Use saved compression statistics (calculated before move)
+    size_t origin_size = graph.saved_origin_size;
     size_t compress_size = 0;
     for(size_t i = 0; i < compress_corpus.size();i++){
         compress_size += compress_corpus[i].coreMap.mem_size();
@@ -199,31 +190,13 @@ int main(int argc, char **argv)
     }
     cout << "Original size: " << origin_size * 4 << " Byte." << endl;
     cout <<"Top compress size: " << compress_size << " Byte." << endl;
-    cout <<"Top Ratio: " << (float)compress_size/origin_size << endl;
+    cout <<"Top Ratio: " << (origin_size > 0 ? (float)compress_size/origin_size : 0.0f) << endl;
 
-    origin_size = 0;
-    compress_size =0;
-    for(size_t i = 0; i < graph.local_corpus.size();i++) {
-        origin_size += graph.local_corpus[i].size();
-        compress_size += graph.local_corpus[i].size();
-        map<vertex_id_t,int> freq;
-        for(size_t j = 1; j < graph.local_corpus[i].size();j++){
-            freq[graph.local_corpus[i][j]]++;
-        }
-        int max_freq = 0;
-        vector<pair<vertex_id_t,int>> core_array;
-        for(auto& pair: freq){
-            core_array.push_back(pair);
-        }
-        sort(core_array.begin(),core_array.end(),[](pair<vertex_id_t, int>&p1,pair<vertex_id_t,int>&p2){
-            return p1.second > p2.second;
-        });
-        if(core_array.size()>0) compress_size -= core_array[0].second;
-        if(core_array.size()>1) compress_size -= core_array[1].second;
-    }
+    // Use saved theoretical compression size
+    size_t theory_compress_size = graph.saved_theory_compress_size;
     cout << "Original size: " << origin_size * 4 << " Byte." << endl;
-    cout <<"Theory compress size: " << compress_size * 4 << " Byte." << endl;
-    cout <<"Ratio: " << (float)compress_size/origin_size << endl;
+    cout <<"Theory compress size: " << theory_compress_size * 4 << " Byte." << endl;
+    cout <<"Ratio: " << (origin_size > 0 ? (float)theory_compress_size/origin_size : 0.0f) << endl;
 
     // =============== Wait for Training Completion ===============
     Timer training_wait_timer;
@@ -257,25 +230,11 @@ int main(int argc, char **argv)
                corpus_compression_time, (corpus_compression_time/total_time)*100);
         printf("6. Training time:               %lf s  (%.2f%% of total)\n", 
                training_time, (training_time/total_time)*100);
-        printf("   - File read time:            %lf s\n", total_file_read_time);
-        printf("   - Pure training time:        %lf s\n", training_time - total_file_read_time);
+        printf("   - Memory-based training (no disk I/O)\n");
         printf("---------------------------------------------------------------------\n");
-        
-        if (!opt.output_path.empty()) {
-            printf("*** DISK I/O ANALYSIS ***\n");
-            printf("Output path configured: %s\n", opt.output_path.c_str());
-            printf("Disk write time:                %lf s  (%.2f%% of total)\n", 
-                   total_disk_write_time, (total_disk_write_time/total_time)*100);
-            printf("Disk read time:                 %lf s  (%.2f%% of total)\n", 
-                   total_file_read_time, (total_file_read_time/total_time)*100);
-            double total_disk_io = total_disk_write_time + total_file_read_time;
-            printf("Total disk I/O time:            %lf s  (%.2f%% of total)\n", 
-                   total_disk_io, (total_disk_io/total_time)*100);
-            printf("If disk I/O time is high, consider:\n");
-            printf("  - Using faster storage (SSD vs HDD)\n");
-            printf("  - Avoiding disk output and keeping corpus in memory\n");
-            printf("  - Using compressed output format\n");
-        }
+        printf("*** MEMORY OPTIMIZATION ENABLED ***\n");
+        printf("Corpus data passed directly through memory pipeline.\n");
+        printf("Disk I/O eliminated for optimal performance.\n");
         printf("=====================================================================\n");
         printf("\n");
     }
