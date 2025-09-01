@@ -1339,10 +1339,10 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
         if (temp_sent_len >= MAX_SENTENCE_LENGTH) break;
       }
       
-      sentence_length[cnt_sentence] = temp_sent_len;
       cnt_sentence++;
+      sentence_length[cnt_sentence] = total_sent_len;
       corpus_index++;
-      if (total_sent_len > MAX_SENTENCE * 100 - MAX_SENTENCE_LENGTH) break;
+      if (total_sent_len >= (MAX_SENTENCE - 1) * 20) break;
     }
 
     if (cnt_sentence == 0) break;
@@ -1355,7 +1355,7 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
 
     // Copy data to GPU and run training
     checkCUDAerr(cudaMemcpy(d_sen, sen, total_sent_len * sizeof(int), cudaMemcpyHostToDevice));
-    checkCUDAerr(cudaMemcpy(d_sent_len, sentence_length, cnt_sentence * sizeof(int), cudaMemcpyHostToDevice));
+    checkCUDAerr(cudaMemcpy(d_sent_len, sentence_length, (cnt_sentence + 1) * sizeof(int), cudaMemcpyHostToDevice));
     checkCUDAerr(cudaMemcpy(d_negSample, negSample, cnt_sentence * negative * sizeof(int), cudaMemcpyHostToDevice));
 
     if (cbow) {
@@ -1644,6 +1644,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
       if(vertex_walker_stop_flag[v]== 0 ){
         float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
+        printf("[ %d ] node_neighbour_average_cos_sim: %f\n",my_rank,s);
         eva_num ++ ;
         if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
           vertex_walker_stop_flag[v] = 1;
