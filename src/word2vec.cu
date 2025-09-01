@@ -38,7 +38,7 @@ using std::endl;
 #define MAX_CODE_LENGTH 40
 
 #define EVALUATION_NEIGHBOUR_NUM 30
-#define NODE_TRAINING_CONVERGE_THRESHOLD 0.2
+#define NODE_TRAINING_CONVERGE_THRESHOLD 0.65
 #define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.7
 
 #define MAX_SENTENCE 15000
@@ -1530,6 +1530,29 @@ float node_neighbour_average_cos_sim(vertex_id_t v_id,myEdgeContainer*csr,float*
   cudaDeviceSynchronize();
   float* h_results = new float[evaluate_num];
   cudaMemcpy(h_results,d_results,evaluate_num*sizeof(float),cudaMemcpyDeviceToHost);
+
+  // // Find min and max values for normalization
+  // float min_val = h_results[0];
+  // float max_val = h_results[0];
+  // for(int i = 1; i < evaluate_num; i++){
+  //   if(h_results[i] < min_val) min_val = h_results[i];
+  //   if(h_results[i] > max_val) max_val = h_results[i];
+  // }
+  
+  // // Apply min-max normalization and sum
+  // float cuda_cos_sim = 0.0f;
+  // float range = max_val - min_val;
+  // for(int i = 0; i < evaluate_num; i++){
+  //   float normalized_val = (range > 0) ? (h_results[i] - min_val) / range : 0.1f;
+  //   cuda_cos_sim += normalized_val;
+  // }
+  
+  // cuda_cos_sim /= evaluate_num;
+  
+  // delete[] h_results;
+  
+  // return  cuda_cos_sim;
+
   float cuda_cos_sim = 0.0f;
   for(int i =0;i < evaluate_num; i++){
     cuda_cos_sim  += h_results[i];
