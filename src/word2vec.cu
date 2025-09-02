@@ -1526,7 +1526,7 @@ float node_neighbour_average_cos_sim(vertex_id_t v_id,myEdgeContainer*csr,float*
   int threadsPerBlock = layer1_size > 200 ? 256 : 128;
   int blocks = evaluate_num;
   size_t sharedMemSize = 3 * threadsPerBlock * sizeof(float);
-  vector_cosine_similarity_kernel<<<blocks,threadsPerBlock,sharedMemSize>>>(d_A, d_B, d_results, 100);
+  vector_cosine_similarity_kernel<<<blocks,threadsPerBlock,sharedMemSize>>>(d_A, d_B, d_results, layer1_size);
   cudaDeviceSynchronize();
   float* h_results = new float[evaluate_num];
   cudaMemcpy(h_results,d_results,evaluate_num*sizeof(float),cudaMemcpyDeviceToHost);
@@ -1595,12 +1595,17 @@ float find_supernode_topK_accurancy(float p,int k,myEdgeContainer*csr){
 double train_spend_time = 0.0;
 double evaluate_spend_time = 0.0;
 void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
+  Timer total_init_timer;  // Total initialization timer
   printf("==========================Train Model In=====================\n");
+  
+  Timer vocab_timer;
   long a, b, c, d;
   FILE *fo;
   starting_alpha = alpha;
   ReadVocabFromDegree(g_v_degree);
+  double vocab_time = vocab_timer.duration();
   printf("========================Read Vocab ok=======================\n");
+  printf("[ %d ] Vocab initialization completed in %.6f seconds\n", my_rank, vocab_time);
   printf("vocab_size: %lu\n",vocab_size);
   // for(size_t i = 0; i < vocab_size * 0.10;i++){
   //   printf("id: %s, degree: %ld\n",vocab[i].word,vocab[i].cn);
@@ -1614,15 +1619,19 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   // if (save_vocab_file[0] != 0) SaveVocab();
   if (output_file[0] == 0) printf("[ Warning ] output file missing\n");
   if (output_file[0] == 0) return;
+  
+  Timer net_timer;
   InitNet();
-  printf("[ %d ] InitNet Success\n",my_rank);
+  double net_time = net_timer.duration();
+  printf("[ %d ] InitNet Success in %.6f seconds\n",my_rank, net_time);
+  
+  Timer cuda_timer;
   if (hs > 0) InitVocabStructCUDA();
   if (negative > 0) InitUnigramTable();
 
   start = clock();
   srand(time(NULL));
 
-  printf("==========init success================\n");
   float* kl = new float;
   // lr_scheduler = new  FixedLR(0.025);
   // lr_scheduler = new  StepDecayLR(0.025,0.5,3);
@@ -1635,16 +1644,36 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
   checkCUDAerr(cudaMalloc(&d_A, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_B, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_results, EVALUATION_NEIGHBOUR_NUM * sizeof(float)));
+  double cuda_time = cuda_timer.duration();
+  
+  double total_init_time = total_init_timer.duration();
+  printf("==========init success================\n");
+  printf("[ %d ] === INITIALIZATION TIMING BREAKDOWN ===\n", my_rank);
+  printf("[ %d ] Vocab setup:     %.6f seconds\n", my_rank, vocab_time);
+  printf("[ %d ] Network init:    %.6f seconds\n", my_rank, net_time);
+  printf("[ %d ] CUDA setup:      %.6f seconds\n", my_rank, cuda_time);
+  printf("[ %d ] TOTAL INIT TIME: %.6f seconds\n", my_rank, total_init_time);
+  printf("[ %d ] ===========================================\n", my_rank);
 
   //thread sync_thread(sync_embedding_func);
   vertex_id_t last_eva_num = UINT_MAX;
   int train_iter = 0;
   bool stop_train_flag = false;
+  
+  // Round-level training timing statistics
+  std::vector<double> round_wait_times;
+  std::vector<double> round_training_times;
+  std::vector<double> round_eval_times;
+  
   while(!stop_train_flag){
-      train_timer.restart();
+    Timer round_timer;  // Timer for entire training round
+    Timer wait_timer;
+    
     // 等待游走产生训练资料
     unique_lock<mutex> lock(mtx);
     cv.wait(lock,[]{return hasResource;});
+    double wait_time = wait_timer.duration();
+    
     corpus_t corpus_data = taskq.pop();  // Get corpus data directly instead of file path
     // 此时可以sample下一轮了
     hasResource = false; // 坑位被释放
@@ -1653,21 +1682,27 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     train_iter++;
     alpha = lr_scheduler->get_lr();
     pause_sync = false;
+    
     //MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
-    printf("[ %d ] train corpus data start\n",my_rank);
+    printf("[ %d ] === TRAINING ROUND %d START === Wait: %.3fs\n",my_rank, train_iter, wait_time);
+    
+    Timer actual_train_timer;
     TrainModelThreadMemory(corpus_data);  // New function to train with memory data
-    printf("[ %d ] train corpus data finished\n",my_rank);
+    double actual_train_time = actual_train_timer.duration();
+    
+    printf("[ %d ] train corpus data finished, time: %.3fs\n",my_rank, actual_train_time);
     //MPI_Barrier(MPI_EMB_COMM);
     // pause_sync = true;
     std::cout << std::endl;
-    train_spend_time += train_timer.duration();
+    
     Timer eva_timer;
     vertex_id_t eva_num = 0;
     printf("[ %d ] evaluation start\n",my_rank);
     for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
       if(vertex_walker_stop_flag[v]== 0 ){
         float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
-        printf("[ %d ] node_neighbour_average_cos_sim: %f\n",my_rank,s);
+        // printf("[ %d ] node_neighbour_average_cos_sim: %f\n",my_rank,s);
+        if(v < 10) printf("Node %d similarity: %f\n", v, s);  
         eva_num ++ ;
         if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
           vertex_walker_stop_flag[v] = 1;
@@ -1686,10 +1721,48 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
       stop_sampling_flag = true; // 停止采样
       stop_train_flag = true;    // 停止训练
     }
-    evaluate_spend_time += eva_timer.duration();
-    printf("[ %d ]Iter %d Evaluate Num: %d Ratio: %f Time: %f s\n",my_rank,train_iter,eva_num,eva_num_ratio,eva_timer.duration());
+    double eval_time = eva_timer.duration();
+    double total_round_time = round_timer.duration();
+    
+    evaluate_spend_time += eval_time;
+    train_spend_time += actual_train_time;  // Use actual training time instead of total round time
+    
+    // Record round timing statistics
+    round_wait_times.push_back(wait_time);
+    round_training_times.push_back(actual_train_time);
+    round_eval_times.push_back(eval_time);
+    
+    printf("[ %d ] === TRAINING ROUND %d COMPLETED === Wait: %.3fs, Train: %.3fs, Eval: %.3fs, Total: %.3fs\n",
+           my_rank, train_iter, wait_time, actual_train_time, eval_time, total_round_time);
+    printf("[ %d ] Evaluate Num: %d Ratio: %f\n", my_rank, eva_num, eva_num_ratio);
+    
     last_eva_num = eva_num;
   }
+  
+  // Print detailed round-level training timing statistics
+  if (!round_wait_times.empty()) {
+    printf("\n================== [ %d ] TRAINING ROUND-LEVEL TIMING STATISTICS ==================\n", my_rank);
+    double total_wait_time = 0.0, total_training_time = 0.0, total_eval_time = 0.0;
+    
+    for (size_t i = 0; i < round_wait_times.size(); i++) {
+      total_wait_time += round_wait_times[i];
+      total_training_time += round_training_times[i];
+      total_eval_time += round_eval_times[i];
+      printf("Round %2zu: Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs\n", 
+             i+1, round_wait_times[i], round_training_times[i], round_eval_times[i],
+             round_wait_times[i] + round_training_times[i] + round_eval_times[i]);
+    }
+    
+    printf("===================================================================================\n");
+    printf("SUMMARY: Rounds=%zu, Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs\n",
+           round_wait_times.size(), total_wait_time, total_training_time, total_eval_time,
+           total_wait_time + total_training_time + total_eval_time);
+    printf("AVERAGES: Wait=%.3fs, Train=%.3fs, Eval=%.3fs per round\n",
+           total_wait_time/round_wait_times.size(), total_training_time/round_wait_times.size(),
+           total_eval_time/round_wait_times.size());
+    printf("===================================================================================\n\n");
+  }
+  
   // MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
   // halt_sync = true;
   // sync_cv.notify_all();

@@ -82,7 +82,7 @@ SAMPLE_ARGS="-g $GRAPH \
 
 # word2vec
 LEARNING_ARGS="-emb_output ./out/${GRAPH_NAME}_emb.txt \
-	 	-size 10 \
+	 	-size 100 \
 		-iter 1 \
 		-threads 100 \
 		-window 2 \

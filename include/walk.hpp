@@ -662,8 +662,22 @@ public:
         std::vector<vertex_id_t> context_map_freq(this->v_num, 0);
         std::vector<double> H;
         bool terminal_flag = false;
+        
+        // Round-level timing statistics
+        std::vector<double> round_walk_times;
+        std::vector<double> round_corpus_times;
+        std::vector<double> round_wait_times;
+        
         while (remained_walker != 0)
         {
+            Timer round_timer;  // Timer for entire round
+            Timer walk_step_timer;  // Timer for walk execution only
+            double current_walk_time = 0.0;
+            double corpus_gen_time = 0.0;
+            double wait_time = 0.0;
+            
+            printf("\n【 %d Round %d Started】 \n",get_mpi_rank(),iter);
+            
             if (walk_data.collect_path_flag)
             {
                 walk_data.pc = new PathCollector(this->worker_num);
@@ -686,7 +700,9 @@ public:
                 }
             }
 
+            walk_step_timer.restart(); // Start timing the actual walk execution
             internal_walk_epoch(&walk_data, walker_config, transition_config);
+            current_walk_time = walk_step_timer.duration();
 
             if (walk_data.collect_path_flag)
             {
@@ -705,9 +721,14 @@ public:
                     string local_output_path = walk_config->output_path_prefix +"-" + s_rank+"-"+s_iter+".txt";
                     Timer timer_dump;
                     paths->dump(local_output_path.c_str(), "w", walk_config->print_with_head_info, context_map_freq,this->local_corpus,this->vertex_cn,this->co_occor);
-                    this->other_time += timer_dump.duration();
+                    corpus_gen_time = timer_dump.duration();
+                    this->other_time += corpus_gen_time;
+                    
+                    Timer wait_timer;
                     unique_lock<mutex> lock(mtx);
                     cv.wait(lock,[]{return !hasResource;});
+                    wait_time = wait_timer.duration();
+                    
                     // if hasResource = true, then block the walking
                     hasResource = true;
                     size_t corpus_size = this->local_corpus.size();  // Save size before move
@@ -717,7 +738,7 @@ public:
                     
                     this->out_queue.push(std::move(this->local_corpus));  // Use move semantics to avoid copying
                     cv.notify_one();
-                    cout<< get_mpi_rank()<<"  =========== [ PUSH CORPUS DATA (size: " << corpus_size << ")]======" <<endl;
+                    cout<< get_mpi_rank()<<"  =========== [ ROUND " << iter << " ] PUSH CORPUS DATA (size: " << corpus_size << "), Walk: " << current_walk_time << "s, Corpus: " << corpus_gen_time << "s, Wait: " << wait_time << "s ======" <<endl;
                     
                     MPI_Allreduce(context_map_freq.data(),  this->vertex_freq, this->v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
                     uint64_t words_sum = 0;
@@ -761,6 +782,17 @@ public:
                     {
                         std::cout << "Delat RE：" << abs(delta_H) << std::endl;
                     }
+                    
+                    // Record round timing statistics
+                    double total_round_time = round_timer.duration();
+                    if (walk_config->output_file_flag) {
+                        round_walk_times.push_back(current_walk_time);
+                        round_corpus_times.push_back(corpus_gen_time);
+                        round_wait_times.push_back(wait_time);
+                        printf("[ %d ] === ROUND %d COMPLETED === Total: %.3fs, Walk: %.3fs, Corpus: %.3fs, Wait: %.3fs\n", 
+                               get_mpi_rank(), iter, total_round_time, current_walk_time, corpus_gen_time, wait_time);
+                    }
+                    
                     iter = iter == 0 ? init_round + 1 : iter + 1;
                     // if(stop_sampling_flag == true){
                     //     printf("[ %d ] STOP_SAMPLING_FLAG SET \n",get_mpi_rank());
@@ -803,6 +835,30 @@ public:
                 }
                 delete walk_data.pc;
             }
+        }
+
+        // Print detailed round-level timing statistics
+        if (!round_walk_times.empty()) {
+            printf("\n================== [ %d ] ROUND-LEVEL TIMING STATISTICS ==================\n", get_mpi_rank());
+            double total_walk_time = 0.0, total_corpus_time = 0.0, total_wait_time = 0.0;
+            
+            for (size_t i = 0; i < round_walk_times.size(); i++) {
+                total_walk_time += round_walk_times[i];
+                total_corpus_time += round_corpus_times[i];
+                total_wait_time += round_wait_times[i];
+                printf("Round %2zu: Walk=%.3fs, Corpus=%.3fs, Wait=%.3fs, Total=%.3fs\n", 
+                       i+1, round_walk_times[i], round_corpus_times[i], round_wait_times[i],
+                       round_walk_times[i] + round_corpus_times[i] + round_wait_times[i]);
+            }
+            
+            printf("========================================================================\n");
+            printf("SUMMARY: Rounds=%zu, Walk=%.3fs, Corpus=%.3fs, Wait=%.3fs, Total=%.3fs\n",
+                   round_walk_times.size(), total_walk_time, total_corpus_time, total_wait_time,
+                   total_walk_time + total_corpus_time + total_wait_time);
+            printf("AVERAGES: Walk=%.3fs, Corpus=%.3fs, Wait=%.3fs per round\n",
+                   total_walk_time/round_walk_times.size(), total_corpus_time/round_walk_times.size(),
+                   total_wait_time/round_walk_times.size());
+            printf("========================================================================\n\n");
         }
 
         this->dealloc_array(walk_data.local_walkers, walker_array_size);
