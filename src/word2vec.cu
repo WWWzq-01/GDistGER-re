@@ -1690,19 +1690,23 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
       printf("[ %d ] evaluation finished\n",my_rank);
     }
     
-    printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
-    MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
-    MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EVA_COMM);
-    // 收敛了，每次减少的比例不多
-    float eva_num_ratio = (float)eva_num / last_eva_num;
-    if( last_eva_num != 0 && eva_num_ratio> EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){
-      halt_sync = true; // 停止同步
-      stop_sampling_flag = true; // 停止采样
-      stop_train_flag = true;    // 停止训练
+    if(train_iter >= init_round){
+      printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
+      MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
+      MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EVA_COMM);
+      // 收敛了，每次减少的比例不多
+      float eva_num_ratio = (float)eva_num / last_eva_num;
+      if( last_eva_num != 0 && eva_num_ratio> EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){
+        halt_sync = true; // 停止同步
+        stop_sampling_flag = true; // 停止采样
+        stop_train_flag = true;    // 停止训练
+      }
+      evaluate_spend_time += eva_timer.duration();
+      printf("[ %d ]Iter %d Evaluate Num: %d Ratio: %f Time: %f s\n",my_rank,train_iter,eva_num,eva_num_ratio,eva_timer.duration());
+      last_eva_num = eva_num;
+    } else {
+      printf("[ %d ]Iter %d Skipping evaluation (init_round=%d)\n",my_rank,train_iter,init_round);
     }
-    evaluate_spend_time += eva_timer.duration();
-    printf("[ %d ]Iter %d Evaluate Num: %d Ratio: %f Time: %f s\n",my_rank,train_iter,eva_num,eva_num_ratio,eva_timer.duration());
-    last_eva_num = eva_num;
   }
   // MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
   // halt_sync = true;
