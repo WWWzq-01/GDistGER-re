@@ -14,7 +14,7 @@
 
 // template struct EdgeContainer<real_t>;
 using namespace std;
-int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer *csr);
+int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer *csr, int init_round);
 extern double actual_training_time;
 
 struct Empty
@@ -86,7 +86,7 @@ int main(int argc, char **argv)
     // =============== Start Training Thread ===============
     Timer training_start_timer;
     printf("[ %d ] Starting training thread...\n", my_rank);
-    thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue), my_rank,myec);
+    thread train_thread(train_corpus_cuda,argc,argv,std::ref(vertex_degree),std::ref(graph.out_queue), my_rank,myec, graph.init_round);
     printf("[ %d ] Training thread started\n", my_rank);
 
     auto extension_comp = [&](Walker<uint32_t> &walker, vertex_id_t current_v)

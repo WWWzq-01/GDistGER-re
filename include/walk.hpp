@@ -794,6 +794,8 @@ public:
                     }
                     
                     iter = iter == 0 ? init_round + 1 : iter + 1;
+                    // iter = iter == 0 ? init_round + 1 : iter + 1;
+                    iter++;
                     // if(stop_sampling_flag == true){
                     //     printf("[ %d ] STOP_SAMPLING_FLAG SET \n",get_mpi_rank());
                     //     terminal_flag = true;
