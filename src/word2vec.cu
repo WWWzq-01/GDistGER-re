@@ -74,6 +74,14 @@ struct vocab_word {
   char *word, *code, codelen;
 };
 
+struct TrainingConfig {
+    int init_round;
+    int batch_size;
+    
+    TrainingConfig(int init_round = 1, int batch_size = 16384) 
+        : init_round(init_round), batch_size(batch_size) {}
+};
+
 float *last_emb;
 
 char train_file[MAX_STRING], output_file[MAX_STRING];
@@ -1500,7 +1508,8 @@ std::vector<float> batch_node_neighbor_average_cos_sim_chunked(
     myEdgeContainer* csr,
     float* d_A_batch, 
     float* d_B_batch, 
-    float* d_results_batch);
+    float* d_results_batch,
+    int batch_size);
 
 std::vector<float> batch_process_single_chunk(
     const std::vector<vertex_id_t>& all_nodes,
@@ -1587,18 +1596,17 @@ std::vector<float> batch_node_neighbor_average_cos_sim_chunked(
     myEdgeContainer* csr,
     float* d_A_batch, 
     float* d_B_batch, 
-    float* d_results_batch) {
-    
-    const int MAX_BATCH_SIZE = 8192;  // Adjust based on GPU memory (8K nodes per batch)
+    float* d_results_batch,
+    int batch_size) {
     std::vector<float> all_results;
     all_results.reserve(all_nodes.size());
     
     printf("[ %d ] Batch processing %zu nodes in chunks of %d\n", 
-           my_rank, all_nodes.size(), MAX_BATCH_SIZE);
+           my_rank, all_nodes.size(), batch_size);
     
     // Process in chunks to manage GPU memory
-    for(size_t chunk_start = 0; chunk_start < all_nodes.size(); chunk_start += MAX_BATCH_SIZE) {
-        size_t chunk_end = std::min(chunk_start + MAX_BATCH_SIZE, all_nodes.size());
+    for(size_t chunk_start = 0; chunk_start < all_nodes.size(); chunk_start += batch_size) {
+        size_t chunk_end = std::min(chunk_start + batch_size, all_nodes.size());
         size_t chunk_size = chunk_end - chunk_start;
         
         printf("[ %d ] Processing chunk %zu-%zu (%zu nodes)\n", 
@@ -1748,12 +1756,8 @@ float find_supernode_topK_accurancy(float p,int k,myEdgeContainer*csr){
 }
 double train_spend_time = 0.0;
 double evaluate_spend_time = 0.0;
-<<<<<<< HEAD
-void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
+void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& config) {
   Timer total_init_timer;  // Total initialization timer
-=======
-void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
->>>>>>> mem_dev
   printf("==========================Train Model In=====================\n");
   
   Timer vocab_timer;
@@ -1804,7 +1808,6 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
   checkCUDAerr(cudaMalloc(&d_A, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_B, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_results, EVALUATION_NEIGHBOUR_NUM * sizeof(float)));
-<<<<<<< HEAD
   double cuda_time = cuda_timer.duration();
   
   double total_init_time = total_init_timer.duration();
@@ -1815,11 +1818,9 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
   printf("[ %d ] CUDA setup:      %.6f seconds\n", my_rank, cuda_time);
   printf("[ %d ] TOTAL INIT TIME: %.6f seconds\n", my_rank, total_init_time);
   printf("[ %d ] ===========================================\n", my_rank);
-=======
   
   // Batch processing GPU memory (larger allocation)
-  const int BATCH_SIZE = 8192;  // 8K nodes per batch
-  const int MAX_BATCH_EVALUATIONS = BATCH_SIZE * EVALUATION_NEIGHBOUR_NUM;  // 8K * 30 = 240K evaluations
+  const int MAX_BATCH_EVALUATIONS = config.batch_size * EVALUATION_NEIGHBOUR_NUM;  // batch_size * 30 evaluations
   float *d_A_batch, *d_B_batch, *d_results_batch;
   
   printf("[ %d ] Allocating batch GPU memory for %d evaluations\n", my_rank, MAX_BATCH_EVALUATIONS);
@@ -1827,7 +1828,6 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
   checkCUDAerr(cudaMalloc(&d_B_batch, MAX_BATCH_EVALUATIONS * layer1_size * sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_results_batch, MAX_BATCH_EVALUATIONS * sizeof(float)));
   printf("[ %d ] Batch GPU memory allocation successful\n", my_rank);
->>>>>>> mem_dev
 
   //thread sync_thread(sync_embedding_func);
   vertex_id_t last_eva_num = UINT_MAX;
@@ -1871,15 +1871,6 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
     
     Timer eva_timer;
     vertex_id_t eva_num = 0;
-<<<<<<< HEAD
-    printf("[ %d ] evaluation start\n",my_rank);
-    for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
-      if(vertex_walker_stop_flag[v]== 0 ){
-        float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
-        // printf("[ %d ] node_neighbour_average_cos_sim: %f\n",my_rank,s);
-        if(v < 10) printf("Node %d similarity: %f\n", v, s);  
-        eva_num ++ ;
-=======
     
     printf("[ %d ] evaluation start\n", my_rank);
     
@@ -1896,7 +1887,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
     if(!nodes_to_evaluate.empty()){
       // Step 2: Batch process all nodes
       std::vector<float> similarities = batch_node_neighbor_average_cos_sim_chunked(
-        nodes_to_evaluate, csr, d_A_batch, d_B_batch, d_results_batch);
+        nodes_to_evaluate, csr, d_A_batch, d_B_batch, d_results_batch, config.batch_size);
       
       // Step 3: Apply results and count non-converged nodes
       int converged_count = 0;
@@ -1907,7 +1898,6 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
         // Debug output for first few nodes
         if(v < 10) printf("Node %d similarity: %f\n", v, s);
         
->>>>>>> mem_dev
         if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
           vertex_walker_stop_flag[v] = 1;
           converged_count++;
@@ -1923,7 +1913,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
     printf("[ %d ] evaluation finished\n", my_rank);
     
     // Old evaluation code (replaced by batch processing above)
-    // if(train_iter >= init_round){
+    // if(train_iter >= config.init_round){
     //   printf("[ %d ] evaluation start\n",my_rank);
     //   for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
     //     if(vertex_walker_stop_flag[v]== 0 ){
@@ -1938,7 +1928,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
     //   printf("[ %d ] evaluation finished\n",my_rank);
     // }
     
-    if(train_iter >= init_round){
+    if(train_iter >= config.init_round){
       printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
       MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
       MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EVA_COMM);
@@ -1953,27 +1943,8 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
       printf("[ %d ]Iter %d Evaluate Num: %d Ratio: %f Time: %f s\n",my_rank,train_iter,eva_num,eva_num_ratio,eva_timer.duration());
       last_eva_num = eva_num;
     } else {
-      printf("[ %d ]Iter %d Skipping evaluation (init_round=%d)\n",my_rank,train_iter,init_round);
+      printf("[ %d ]Iter %d Skipping evaluation (init_round=%d)\n",my_rank,train_iter,config.init_round);
     }
-<<<<<<< HEAD
-    double eval_time = eva_timer.duration();
-    double total_round_time = round_timer.duration();
-    
-    evaluate_spend_time += eval_time;
-    train_spend_time += actual_train_time;  // Use actual training time instead of total round time
-    
-    // Record round timing statistics
-    round_wait_times.push_back(wait_time);
-    round_training_times.push_back(actual_train_time);
-    round_eval_times.push_back(eval_time);
-    
-    printf("[ %d ] === TRAINING ROUND %d COMPLETED === Wait: %.3fs, Train: %.3fs, Eval: %.3fs, Total: %.3fs\n",
-           my_rank, train_iter, wait_time, actual_train_time, eval_time, total_round_time);
-    printf("[ %d ] Evaluate Num: %d Ratio: %f\n", my_rank, eva_num, eva_num_ratio);
-    
-    last_eva_num = eva_num;
-=======
->>>>>>> mem_dev
   }
   
   // Print detailed round-level training timing statistics
@@ -2110,7 +2081,7 @@ int ArgPos(char *str, int argc, char **argv) {
   }
   return -1;
 }
-int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer* csr, int init_round) 
+int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer* csr, const TrainingConfig& config) 
 {
   Timer actual_training_timer;
   printf("[ %d ] Starting actual training execution...\n", _my_rank);
@@ -2274,7 +2245,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   checkCUDAerr(cudaMalloc((void **)&d_expTable, (EXP_TABLE_SIZE + 1) * sizeof(float)));
   checkCUDAerr(cudaMemcpy(d_expTable, expTable, (EXP_TABLE_SIZE + 1) * sizeof(float), cudaMemcpyHostToDevice));
 
-  TrainModel(corpus_q,csr,init_round);
+  TrainModel(corpus_q,csr,config);
 
     printf("[ %d ] [Sync Time Spend: %f s]\n",my_rank,sync_spend_time);
   // memory free

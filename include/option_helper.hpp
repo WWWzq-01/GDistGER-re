@@ -99,6 +99,7 @@ private:
     args::ValueFlag<std::string> partition_path_flag;
     args::ValueFlag<vertex_id_t> min_length_flag;
     args::ValueFlag<vertex_id_t> init_round_flag;
+    args::ValueFlag<vertex_id_t> batch_size_flag;
     args::Flag make_undirected_flag;
 
 public:
@@ -108,13 +109,14 @@ public:
     bool make_undirected;
     vertex_id_t min_length;
     vertex_id_t init_round;
+    vertex_id_t batch_size;
     GraphOptionHelper():
         v_num_flag(parser, "vertex", "vertex number", {'v'}),
         graph_path_flag(parser, "graph", "graph data path", {'g'}),
         partition_path_flag(parser,"partition","graph vertices partition path",{'p'}),
         min_length_flag(parser, "min_length","min length per walker",{"min_L"}),
         init_round_flag(parser, "init_round", "init round to begin", {"min_R"}),
-
+        batch_size_flag(parser, "batch_size", "batch size for evaluation", {"batch_size"}),
         make_undirected_flag(parser, "make-undirected", "load graph and treat each edge as undirected edge", {"make-undirected"})
     {}
     virtual void parse(int argc, char **argv)
@@ -129,6 +131,12 @@ public:
 
         assert(init_round_flag);
         init_round = args::get(init_round_flag);
+
+        if (batch_size_flag) {
+            batch_size = args::get(batch_size_flag);
+        } else {
+            batch_size = 16384;  // Default value
+        }
 
         assert(graph_path_flag);
         graph_path = args::get(graph_path_flag);
