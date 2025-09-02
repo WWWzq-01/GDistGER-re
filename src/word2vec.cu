@@ -1526,7 +1526,7 @@ float node_neighbour_average_cos_sim(vertex_id_t v_id,myEdgeContainer*csr,float*
   int threadsPerBlock = layer1_size > 200 ? 256 : 128;
   int blocks = evaluate_num;
   size_t sharedMemSize = 3 * threadsPerBlock * sizeof(float);
-  vector_cosine_similarity_kernel<<<blocks,threadsPerBlock,sharedMemSize>>>(d_A, d_B, d_results, 100);
+  vector_cosine_similarity_kernel<<<blocks,threadsPerBlock,sharedMemSize>>>(d_A, d_B, d_results, layer1_size);
   cudaDeviceSynchronize();
   float* h_results = new float[evaluate_num];
   cudaMemcpy(h_results,d_results,evaluate_num*sizeof(float),cudaMemcpyDeviceToHost);
@@ -1594,7 +1594,7 @@ float find_supernode_topK_accurancy(float p,int k,myEdgeContainer*csr){
 }
 double train_spend_time = 0.0;
 double evaluate_spend_time = 0.0;
-void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
+void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, int init_round) {
   printf("==========================Train Model In=====================\n");
   long a, b, c, d;
   FILE *fo;
@@ -1663,18 +1663,32 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr) {
     train_spend_time += train_timer.duration();
     Timer eva_timer;
     vertex_id_t eva_num = 0;
-    printf("[ %d ] evaluation start\n",my_rank);
-    for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
-      if(vertex_walker_stop_flag[v]== 0 ){
-        float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
-        printf("[ %d ] node_neighbour_average_cos_sim: %f\n",my_rank,s);
-        eva_num ++ ;
-        if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
-          vertex_walker_stop_flag[v] = 1;
+    // printf("[ %d ] evaluation start\n",my_rank);
+    // for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
+    //   if(vertex_walker_stop_flag[v]== 0 ){
+    //     float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
+    //     if(v < 10) printf("[ %d ] node_neighbour_average_cos_sim: %f\n",my_rank,s);
+    //     eva_num ++ ;
+    //     if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
+    //       vertex_walker_stop_flag[v] = 1;
+    //     }
+    //   }
+    // }
+    // printf("[ %d ] evaluation finished\n",my_rank);
+    if(train_iter >= init_round){
+      printf("[ %d ] evaluation start\n",my_rank);
+      for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
+        if(vertex_walker_stop_flag[v]== 0 ){
+          float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
+          if(v < 10) printf("[ %d ] node_neighbour_average_cos_sim: %f\n",my_rank,s);
+          eva_num ++ ;
+          if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
+            vertex_walker_stop_flag[v] = 1;
+          }
         }
       }
+      printf("[ %d ] evaluation finished\n",my_rank);
     }
-    printf("[ %d ] evaluation finished\n",my_rank);
     
     printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
     MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
@@ -1792,7 +1806,7 @@ int ArgPos(char *str, int argc, char **argv) {
   }
   return -1;
 }
-int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer* csr) 
+int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer* csr, int init_round) 
 {
   Timer actual_training_timer;
   printf("[ %d ] Starting actual training execution...\n", _my_rank);
@@ -1956,7 +1970,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   checkCUDAerr(cudaMalloc((void **)&d_expTable, (EXP_TABLE_SIZE + 1) * sizeof(float)));
   checkCUDAerr(cudaMemcpy(d_expTable, expTable, (EXP_TABLE_SIZE + 1) * sizeof(float), cudaMemcpyHostToDevice));
 
-  TrainModel(corpus_q,csr);
+  TrainModel(corpus_q,csr,init_round);
 
     printf("[ %d ] [Sync Time Spend: %f s]\n",my_rank,sync_spend_time);
   // memory free
