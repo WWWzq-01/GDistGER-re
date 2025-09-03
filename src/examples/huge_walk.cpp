@@ -181,26 +181,17 @@ int main(int argc, char **argv)
     double feedback_time = feedback_timer.duration();
     printf("[ %d ] Information feedback collection completed in %lf seconds\n", my_rank, feedback_time);
 
-    // =============== Corpus Compression ===============
-    Timer compression_timer;
-    printf("[ %d ] Starting corpus compression...\n", my_rank);
+    // =============== Corpus Compression Statistics ===============
+    printf("[ %d ] Displaying compression statistics (computed during walk)...\n", my_rank);
     
-    compress_t compress_corpus;
-    CorpusCompressor compressor;
-    compressor.compressCorpus(graph.local_corpus, compress_corpus);
-    corpus_compression_time = compression_timer.duration();
-    printf("[ %d ] Corpus compression completed in %lf seconds\n", my_rank, corpus_compression_time);
-
-    // Use saved compression statistics (calculated before move)
+    // Use saved compression statistics (calculated before move during walk)
     size_t origin_size = graph.saved_origin_size;
-    size_t compress_size = 0;
-    for(size_t i = 0; i < compress_corpus.size();i++){
-        compress_size += compress_corpus[i].coreMap.mem_size();
-        compress_size += compress_corpus[i].misc_data.size() * sizeof(vertex_id_t);
-    }
+    size_t compress_size = graph.saved_compress_size;
+    corpus_compression_time = 0.0;  // Compression was done during walk, so no additional time here
+    
     cout << "Original size: " << origin_size * 4 << " Byte." << endl;
     cout <<"Top compress size: " << compress_size << " Byte." << endl;
-    cout <<"Top Ratio: " << (origin_size > 0 ? (float)compress_size/origin_size : 0.0f) << endl;
+    cout <<"Top Ratio: " << (origin_size > 0 ? (float)compress_size/(origin_size * 4) : 0.0f) << endl;
 
     // Use saved theoretical compression size
     size_t theory_compress_size = graph.saved_theory_compress_size;

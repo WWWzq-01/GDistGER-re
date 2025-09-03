@@ -5,6 +5,7 @@
 #include "type.hpp"
 #include "graph.hpp"
 #include "path.hpp"
+#include "compress.hpp"
 
 #include <cstdio>
 #include <memory>
@@ -416,6 +417,7 @@ public:
     // Compression statistics
     size_t saved_origin_size = 0;
     size_t saved_theory_compress_size = 0;
+    size_t saved_compress_size = 0;
     
     void get_new_sort()
     {
@@ -736,6 +738,18 @@ public:
                     // Calculate compression statistics before move
                     this->calculateCompressionStats();
                     
+                    // Perform compression test before moving data
+                    compress_t compress_corpus;
+                    CorpusCompressor compressor;
+                    compressor.compressCorpus(this->local_corpus, compress_corpus);
+                    
+                    // Calculate and save actual compression size
+                    this->saved_compress_size = 0;
+                    for(size_t i = 0; i < compress_corpus.size(); i++){
+                        this->saved_compress_size += compress_corpus[i].coreMap.mem_size();
+                        this->saved_compress_size += compress_corpus[i].misc_data.size() * sizeof(vertex_id_t);
+                    }
+                    
                     this->out_queue.push(std::move(this->local_corpus));  // Use move semantics to avoid copying
                     cv.notify_one();
                     cout<< get_mpi_rank()<<"  =========== [ ROUND " << iter << " ] PUSH CORPUS DATA (size: " << corpus_size << "), Walk: " << current_walk_time << "s, Corpus: " << corpus_gen_time << "s, Wait: " << wait_time << "s ======" <<endl;
@@ -793,7 +807,6 @@ public:
                                get_mpi_rank(), iter, total_round_time, current_walk_time, corpus_gen_time, wait_time);
                     }
                     
-                    iter = iter == 0 ? init_round + 1 : iter + 1;
                     // iter = iter == 0 ? init_round + 1 : iter + 1;
                     iter++;
                     // if(stop_sampling_flag == true){

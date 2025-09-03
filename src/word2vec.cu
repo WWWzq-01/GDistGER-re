@@ -1772,9 +1772,11 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   // for(size_t i = 0; i < vocab_size * 0.10;i++){
   //   printf("id: %s, degree: %ld\n",vocab[i].word,vocab[i].cn);
   // }
-   Timer train_timer;
+  Timer train_timer;
   vector<float> H;
   float delta_H;
+  int init_round = config.init_round;
+  int batch_size = config.batch_size;
   
 
   // if (read_vocab_file[0] != 0) ReadVocab(); else LearnVocabFromTrainFile();
@@ -1820,7 +1822,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   printf("[ %d ] ===========================================\n", my_rank);
   
   // Batch processing GPU memory (larger allocation)
-  const int MAX_BATCH_EVALUATIONS = config.batch_size * EVALUATION_NEIGHBOUR_NUM;  // batch_size * 30 evaluations
+  const int MAX_BATCH_EVALUATIONS = batch_size * EVALUATION_NEIGHBOUR_NUM;  // batch_size * 30 evaluations
   float *d_A_batch, *d_B_batch, *d_results_batch;
   
   printf("[ %d ] Allocating batch GPU memory for %d evaluations\n", my_rank, MAX_BATCH_EVALUATIONS);
@@ -1830,7 +1832,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   printf("[ %d ] Batch GPU memory allocation successful\n", my_rank);
 
   //thread sync_thread(sync_embedding_func);
-  vertex_id_t last_eva_num = UINT_MAX;
+  vertex_id_t last_eva_num = vocab_size;
   int train_iter = 0;
   bool stop_train_flag = false;
   
@@ -1869,66 +1871,50 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     // pause_sync = true;
     std::cout << std::endl;
     
-    Timer eva_timer;
     vertex_id_t eva_num = 0;
     
-    printf("[ %d ] evaluation start\n", my_rank);
-    
-    // Step 1: Collect all nodes that need evaluation
-    std::vector<vertex_id_t> nodes_to_evaluate;
-    for(vertex_id_t v = part_vertex_num * my_rank; v < part_vertex_num * (my_rank + 1) && v < vocab_size; v++){
-      if(vertex_walker_stop_flag[v] == 0){
-        nodes_to_evaluate.push_back(v);
-      }
-    }
-    
-    printf("[ %d ] Found %zu nodes to evaluate\n", my_rank, nodes_to_evaluate.size());
-    
-    if(!nodes_to_evaluate.empty()){
-      // Step 2: Batch process all nodes
-      std::vector<float> similarities = batch_node_neighbor_average_cos_sim_chunked(
-        nodes_to_evaluate, csr, d_A_batch, d_B_batch, d_results_batch, config.batch_size);
+    if(train_iter >= init_round){
+      printf("[ %d ] evaluation start\n", my_rank);
       
-      // Step 3: Apply results and count non-converged nodes
-      int converged_count = 0;
-      for(size_t i = 0; i < nodes_to_evaluate.size(); i++){
-        vertex_id_t v = nodes_to_evaluate[i];
-        float s = similarities[i];
-        
-        // Debug output for first few nodes
-        if(v < 10) printf("Node %d similarity: %f\n", v, s);
-        
-        if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
-          vertex_walker_stop_flag[v] = 1;
-          converged_count++;
-        } else {
-          eva_num++;
+      Timer eva_timer;
+      // Step 1: Collect all nodes that need evaluation
+      std::vector<vertex_id_t> nodes_to_evaluate;
+      for(vertex_id_t v = part_vertex_num * my_rank; v < part_vertex_num * (my_rank + 1) && v < vocab_size; v++){
+        if(vertex_walker_stop_flag[v] == 0){
+          nodes_to_evaluate.push_back(v);
         }
       }
       
-      printf("[ %d ] Batch evaluation completed: %d converged, %d non-converged\n", 
-             my_rank, converged_count, eva_num);
-    }
-    
-    printf("[ %d ] evaluation finished\n", my_rank);
-    
-    // Old evaluation code (replaced by batch processing above)
-    // if(train_iter >= config.init_round){
-    //   printf("[ %d ] evaluation start\n",my_rank);
-    //   for(vertex_id_t v = part_vertex_num * my_rank;v < part_vertex_num * (my_rank + 1) && v < vocab_size ; v++){
-    //     if(vertex_walker_stop_flag[v]== 0 ){
-    //       float s = node_neighbour_average_cos_sim(v,csr,d_A,d_B,d_results);
-    //       if(v < 10) printf("[ %d ] node_neighbour_average_cos_sim: %f\n",my_rank,s);
-    //       eva_num ++ ;
-    //       if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
-    //         vertex_walker_stop_flag[v] = 1;
-    //       }
-    //     }
-    //   }
-    //   printf("[ %d ] evaluation finished\n",my_rank);
-    // }
-    
-    if(train_iter >= config.init_round){
+      printf("[ %d ] Found %zu nodes to evaluate\n", my_rank, nodes_to_evaluate.size());
+      
+      if(!nodes_to_evaluate.empty()){
+        // Step 2: Batch process all nodes
+        std::vector<float> similarities = batch_node_neighbor_average_cos_sim_chunked(
+          nodes_to_evaluate, csr, d_A_batch, d_B_batch, d_results_batch, batch_size);
+        
+        // Step 3: Apply results and count non-converged nodes
+        int converged_count = 0;
+        for(size_t i = 0; i < nodes_to_evaluate.size(); i++){
+          vertex_id_t v = nodes_to_evaluate[i];
+          float s = similarities[i];
+          
+          // Debug output for first few nodes
+          if(v < 10) printf("Node %d similarity: %f\n", v, s);
+          
+          if(s > NODE_TRAINING_CONVERGE_THRESHOLD){
+            vertex_walker_stop_flag[v] = 1;
+            converged_count++;
+          } else {
+            eva_num++;
+          }
+        }
+        
+        printf("[ %d ] Batch evaluation completed: %d converged, %d non-converged\n", 
+               my_rank, converged_count, eva_num);
+      }
+      
+      printf("[ %d ] evaluation finished\n", my_rank);
+      
       printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
       MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
       MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EVA_COMM);
@@ -1939,11 +1925,19 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
         stop_sampling_flag = true; // 停止采样
         stop_train_flag = true;    // 停止训练
       }
-      evaluate_spend_time += eva_timer.duration();
       printf("[ %d ]Iter %d Evaluate Num: %d Ratio: %f Time: %f s\n",my_rank,train_iter,eva_num,eva_num_ratio,eva_timer.duration());
+      double eval_time = eva_timer.duration();
+      double total_round_time = round_timer.duration();
+      
+      // Record round timing statistics
+      round_wait_times.push_back(wait_time);
+      round_training_times.push_back(actual_train_time);
+      round_eval_times.push_back(eval_time);
+      printf("[ %d ] === TRAINING ROUND %d COMPLETED === Wait: %.3fs, Train: %.3fs, Eval: %.3fs, Total: %.3fs\n",
+        my_rank, train_iter, wait_time, actual_train_time, eval_time, total_round_time);
       last_eva_num = eva_num;
     } else {
-      printf("[ %d ]Iter %d Skipping evaluation (init_round=%d)\n",my_rank,train_iter,config.init_round);
+      printf("[ %d ]Iter %d Skipping evaluation (init_round=%d)\n",my_rank,train_iter,init_round);
     }
   }
   
