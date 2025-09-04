@@ -1045,12 +1045,17 @@ double actual_training_time = 0.0;
 double total_file_read_time = 0.0;
 void sync_embedding_func()
 {
+  // 单机模式下不需要同步
+  if (num_procs == 1) {
+    return;
+  }
+  
   Timer sync_timer;
   // chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000);
   int sync_times = 1;
   while(!halt_sync)
   {
-    sleep(1);
+    usleep(100000); // 100ms instead of 1s for faster sync frequency
     // if(true == pause_sync) {
     //   syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000); // next sync time.
     // }
@@ -1065,9 +1070,9 @@ void sync_embedding_func()
     //   continue;
     // }
     //block the training thread; 
-    // trainBlocked = true;
+    trainBlocked = true;
 
-    // sync_timer.restart();
+    sync_timer.restart();
     // all_sync();
     // sync_spend_time += sync_timer.duration();
     
@@ -1128,10 +1133,11 @@ void sync_embedding_func()
             layer1_size * sizeof(float), cudaMemcpyHostToDevice));
     }
     checkCUDAerr(cudaDeviceSynchronize());
+    sync_spend_time += sync_timer.duration(); 
     // syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
-    // trainBlocked = false; // unblock the traing thread.
-    // sync_cv.notify_one(); // wake trainer
-    // printf("[ %d ] Syncing Times No.%d\n",my_rank,sync_times++);
+    trainBlocked = false; // unblock the traing thread.
+    sync_cv.notify_one(); // wake trainer
+    printf("[ %d ] Syncing Times No.%d, sync %d nodes\n",my_rank,sync_times++, sync_node_num);
   }
 }
 
@@ -1174,8 +1180,8 @@ void TrainModelThread(string data_path)
   fseek(fi, 0, SEEK_SET);
 
   while (1) {
-    // unique_lock<mutex> lock(sync_mtx);
-    // sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
+    unique_lock<mutex> lock(sync_mtx);
+    sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
                                                               
     if (word_count - last_word_count > 10000) {
       word_count_actual += word_count - last_word_count;
@@ -1322,6 +1328,12 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   size_t corpus_index = 0;
   
   while (corpus_index < corpus_data.size()) {
+    // 多进程环境下才需要等待同步
+    if (num_procs > 1) {
+      unique_lock<mutex> lock(sync_mtx);
+      sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
+    }
+                                                              
     if (word_count - last_word_count > 10000) {
       word_count_actual += word_count - last_word_count;
       last_word_count = word_count;
@@ -1346,7 +1358,10 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
         word = id2offset[vertex_id];  // Convert vertex ID to vocab index
         if (word == -1) continue;
         word_count++;
-        if (word == 0) break;  // End of sentence
+        if (word == 0) {
+          word_count++;  // Match file mode behavior
+          break;  // End of sentence
+        }
         
         if (sample > 0) {
           float ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
@@ -1359,6 +1374,11 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
         if (temp_sent_len >= MAX_SENTENCE_LENGTH) break;
       }
       
+      // Check if sentence ended with word 0, matching file mode behavior
+      if (word == 0) {
+        word_count++;
+      }
+      
       cnt_sentence++;
       sentence_length[cnt_sentence] = total_sent_len;
       corpus_index++;
@@ -1367,10 +1387,12 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
 
     if (cnt_sentence == 0) break;
 
-    // Generate negative samples
+    // Generate negative samples (match file mode behavior)
     for (int i = 0; i < cnt_sentence * negative; i++) {
-      negSample[i] = table[rand() % table_size];
-      if (negSample[i] == 0) negSample[i] = rand() % (vocab_size - 1) + 1;
+      int randd = rand();
+      int tempSample = table[randd % table_size];
+      if (tempSample == 0) negSample[i] = randd % (vocab_size - 1) + 1;
+      else                 negSample[i] = tempSample;
     }
 
     // Copy data to GPU and run training
@@ -2118,7 +2140,10 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   checkCUDAerr(cudaMalloc(&d_results_batch, MAX_BATCH_EVALUATIONS * sizeof(float)));
   printf("[ %d ] Batch GPU memory allocation successful\n", my_rank);
 
-  //thread sync_thread(sync_embedding_func);
+  thread* sync_thread = nullptr;
+  if (num_procs > 1) {
+    sync_thread = new thread(sync_embedding_func);
+  }
   vertex_id_t last_eva_num = vocab_size;
   int train_iter = 0;
   bool stop_train_flag = false;
@@ -2146,7 +2171,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     alpha = lr_scheduler->get_lr();
     pause_sync = false;
     
-    //MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+    MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
     printf("[ %d ] === TRAINING ROUND %d START === Wait: %.3fs\n",my_rank, train_iter, wait_time);
     
     Timer actual_train_timer;
@@ -2154,8 +2179,8 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     double actual_train_time = actual_train_timer.duration();
     
     printf("[ %d ] train corpus data finished, time: %.3fs\n",my_rank, actual_train_time);
-    //MPI_Barrier(MPI_EMB_COMM);
-    // pause_sync = true;
+    MPI_Barrier(MPI_EMB_COMM);
+    pause_sync = true;
     std::cout << std::endl;
     
     vertex_id_t eva_num = 0;
@@ -2261,17 +2286,25 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
            total_wait_time/round_wait_times.size(), total_training_time/round_wait_times.size(),
            total_eval_time/round_wait_times.size());
     printf("===================================================================================\n\n");
+    
+    // Update global timing variables
+    train_spend_time = total_training_time;
+    evaluate_spend_time = total_eval_time;
   }
   
-  // MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
-  // halt_sync = true;
-  // sync_cv.notify_all();
-  //printf("[ %d ] Waiting Syncing Thread\n",my_rank);
-  //sync_thread.join();
-  //MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
-  //printf("[ %d ] Syncing Thread Halt\n",my_rank);
+  // 只在多进程模式下停止同步线程
+  if (num_procs > 1) {
+    MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+    halt_sync = true;
+    sync_cv.notify_all();
+    printf("[ %d ] Waiting Syncing Thread\n",my_rank);
+    sync_thread->join();
+    MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+    printf("[ %d ] Syncing Thread Halt\n",my_rank);
+    delete sync_thread;
+  }
 
-  //printf("[%d] Train: %f Sync: %f EVA: %f \n",my_rank,train_spend_time,sync_spend_time,evaluate_spend_time);
+  printf("[%d] Train: %f Sync: %f EVA: %f \n",my_rank,actual_training_time,sync_spend_time,evaluate_spend_time);
   
   // Free original evaluation GPU memory
   cudaFree(d_A);
@@ -2539,7 +2572,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   TrainModel(corpus_q,csr,config);
 
-    printf("[ %d ] [Sync Time Spend: %f s]\n",my_rank,sync_spend_time);
+  printf("[ %d ] [Sync Time Spend: %f s]\n",my_rank,sync_spend_time);
   // memory free
   free(vocab_codelen);
   free(vocab_point);
