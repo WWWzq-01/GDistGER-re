@@ -82,6 +82,18 @@ struct TrainingConfig {
         : init_round(init_round), batch_size(batch_size) {}
 };
 
+// ========================================================
+// GPU OPTIMIZATION CONFIGURATION SWITCHES
+// ========================================================
+// Toggle between original memory-copy batch implementation and GPU-direct implementation
+// Set to true to enable GPU-side direct indexing optimization (eliminates memory copy bottleneck)
+bool use_gpu_direct_indexing = true;
+
+// Toggle between simple and shared-memory optimized kernel for direct indexing
+// Only used when use_gpu_direct_indexing = true
+bool use_optimized_direct_kernel = true;
+// ========================================================
+
 float *last_emb;
 
 char train_file[MAX_STRING], output_file[MAX_STRING];
@@ -1502,6 +1514,122 @@ __global__ void vector_cosine_similarity_kernel(
   }
 }
 
+// ========================================================
+// GPU-SIDE DIRECT INDEXING OPTIMIZATION
+// ========================================================
+// New kernel that directly indexes embeddings on GPU to eliminate memory copies
+// This kernel processes multiple node-neighbor pairs in a single batch
+__global__ void batch_similarity_direct_index_kernel(
+    const float* d_syn0,           // All embeddings on GPU 
+    const vertex_id_t* d_node_ids, // Node IDs to evaluate
+    const vertex_id_t* d_neighbor_ids, // Corresponding neighbor IDs
+    const int* d_eval_counts,      // Number of evaluations per node
+    const int* d_eval_offsets,     // Offset for each node's evaluations
+    float* d_results,              // Output similarity results
+    int vector_length,             // Embedding dimension (layer1_size)
+    int total_evaluations,         // Total number of node-neighbor pairs
+    const vertex_id_t* d_id2offset // ID to offset mapping
+) {
+    int eval_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (eval_idx >= total_evaluations) return;
+    
+    // Get node and neighbor IDs for this evaluation
+    vertex_id_t node_id = d_node_ids[eval_idx];
+    vertex_id_t neighbor_id = d_neighbor_ids[eval_idx];
+    
+    // Convert IDs to embedding offsets
+    vertex_id_t node_offset = d_id2offset[node_id];
+    vertex_id_t neighbor_offset = d_id2offset[neighbor_id];
+    
+    // Calculate cosine similarity directly from GPU embeddings
+    float dot_product = 0.0f;
+    float node_norm = 0.0f;
+    float neighbor_norm = 0.0f;
+    
+    // Compute dot product and norms
+    for (int i = 0; i < vector_length; i++) {
+        float node_val = d_syn0[node_offset * vector_length + i];
+        float neighbor_val = d_syn0[neighbor_offset * vector_length + i];
+        
+        dot_product += node_val * neighbor_val;
+        node_norm += node_val * node_val;
+        neighbor_norm += neighbor_val * neighbor_val;
+    }
+    
+    // Calculate cosine similarity
+    node_norm = sqrtf(node_norm);
+    neighbor_norm = sqrtf(neighbor_norm);
+    
+    if (node_norm == 0.0f || neighbor_norm == 0.0f) {
+        d_results[eval_idx] = 0.0f;
+    } else {
+        d_results[eval_idx] = dot_product / (node_norm * neighbor_norm);
+    }
+}
+
+// Optimized kernel using shared memory and warp-level reductions for better performance
+__global__ void batch_similarity_direct_index_optimized_kernel(
+    const float* d_syn0,
+    const vertex_id_t* d_node_ids,
+    const vertex_id_t* d_neighbor_ids, 
+    float* d_results,
+    int vector_length,
+    int total_evaluations,
+    const vertex_id_t* d_id2offset
+) {
+    int eval_idx = blockIdx.x;  // One block per evaluation pair
+    int tid = threadIdx.x;      // Thread within block
+    
+    if (eval_idx >= total_evaluations) return;
+    
+    extern __shared__ float s_data[];
+    float* s_dot = s_data;
+    float* s_node_norm = &s_data[blockDim.x];
+    float* s_neighbor_norm = &s_data[2 * blockDim.x];
+    
+    // Get node and neighbor offsets
+    vertex_id_t node_offset = d_id2offset[d_node_ids[eval_idx]];
+    vertex_id_t neighbor_offset = d_id2offset[d_neighbor_ids[eval_idx]];
+    
+    // Initialize shared memory
+    float node_val = 0.0f, neighbor_val = 0.0f;
+    if (tid < vector_length) {
+        node_val = d_syn0[node_offset * vector_length + tid];
+        neighbor_val = d_syn0[neighbor_offset * vector_length + tid];
+    }
+    
+    s_dot[tid] = node_val * neighbor_val;
+    s_node_norm[tid] = node_val * node_val;
+    s_neighbor_norm[tid] = neighbor_val * neighbor_val;
+    
+    __syncthreads();
+    
+    // Tree reduction
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_dot[tid] += s_dot[tid + stride];
+            s_node_norm[tid] += s_node_norm[tid + stride];
+            s_neighbor_norm[tid] += s_neighbor_norm[tid + stride];
+        }
+        __syncthreads();
+    }
+    
+    // Calculate final similarity (thread 0 only)
+    if (tid == 0) {
+        float dot_product = s_dot[0];
+        float node_norm = sqrtf(s_node_norm[0]);
+        float neighbor_norm = sqrtf(s_neighbor_norm[0]);
+        
+        if (node_norm == 0.0f || neighbor_norm == 0.0f) {
+            d_results[eval_idx] = 0.0f;
+        } else {
+            d_results[eval_idx] = dot_product / (node_norm * neighbor_norm);
+        }
+    }
+}
+// ========================================================
+
 // Function declarations for batch processing
 std::vector<float> batch_node_neighbor_average_cos_sim_chunked(
     const std::vector<vertex_id_t>& all_nodes,
@@ -1519,6 +1647,18 @@ std::vector<float> batch_process_single_chunk(
     float* d_A_batch,
     float* d_B_batch, 
     float* d_results_batch);
+
+// ========================================================
+// GPU-SIDE DIRECT INDEXING WRAPPER FUNCTION
+// ========================================================
+// New optimized function that eliminates memory copy bottleneck
+// Maintains same interface as batch_node_neighbor_average_cos_sim_chunked
+std::vector<float> batch_node_neighbor_direct_index(
+    const std::vector<vertex_id_t>& all_nodes,
+    myEdgeContainer* csr,
+    int batch_size,
+    bool use_optimized_kernel = true);
+// ========================================================
 
 float node_neighbour_average_cos_sim(vertex_id_t v_id,myEdgeContainer*csr,float* d_A,float* d_B,float* d_results){
   float sum_cos_sim = 0.0f;
@@ -1692,7 +1832,7 @@ std::vector<float> batch_process_single_chunk(
         size_t sharedMemSize = 3 * threadsPerBlock * sizeof(float);
         
         vector_cosine_similarity_kernel<<<blocks, threadsPerBlock, sharedMemSize>>>(
-            d_A_batch, d_B_batch, d_results_batch, 100);
+            d_A_batch, d_B_batch, d_results_batch, layer1_size);
         cudaDeviceSynchronize();
         
         // Step 3: Copy results back and compute averages
@@ -1725,6 +1865,153 @@ std::vector<float> batch_process_single_chunk(
     
     return chunk_results;
 }
+
+// ========================================================
+// GPU-SIDE DIRECT INDEXING IMPLEMENTATION
+// ========================================================
+std::vector<float> batch_node_neighbor_direct_index(
+    const std::vector<vertex_id_t>& all_nodes,
+    myEdgeContainer* csr,
+    int batch_size,
+    bool use_optimized_kernel) {
+    
+    std::vector<float> all_results;
+    all_results.reserve(all_nodes.size());
+    
+    printf("[ %d ] GPU Direct Index: Processing %zu nodes (batch_size=%d, optimized=%s)\n", 
+           my_rank, all_nodes.size(), batch_size, use_optimized_kernel ? "true" : "false");
+    
+    // Process in chunks to manage GPU memory
+    for(size_t chunk_start = 0; chunk_start < all_nodes.size(); chunk_start += batch_size) {
+        size_t chunk_end = std::min(chunk_start + batch_size, all_nodes.size());
+        size_t chunk_size = chunk_end - chunk_start;
+        
+        printf("[ %d ] GPU Direct: Processing chunk %zu-%zu (%zu nodes)\n", 
+               my_rank, chunk_start, chunk_end-1, chunk_size);
+        
+        // Step 1: Collect all node-neighbor pairs for this chunk
+        std::vector<vertex_id_t> node_ids;
+        std::vector<vertex_id_t> neighbor_ids;
+        std::vector<int> node_eval_counts(chunk_size);
+        std::vector<int> eval_offsets(chunk_size);
+        
+        int total_evaluations = 0;
+        
+        for(size_t i = 0; i < chunk_size; i++) {
+            vertex_id_t v_id = all_nodes[chunk_start + i];
+            
+            // Get neighbor set
+            std::vector<vertex_id_t> neighbor_set;
+            for(auto it = csr->adj_lists[v_id].begin; it < csr->adj_lists[v_id].end; it++) {
+                neighbor_set.push_back(it->neighbour);
+            }
+            
+            // Limit evaluation number
+            int evaluate_num = neighbor_set.size();
+            if(evaluate_num > EVALUATION_NEIGHBOUR_NUM) {
+                evaluate_num = EVALUATION_NEIGHBOUR_NUM;
+                std::random_device rd;
+                std::mt19937 g(rd());
+                std::shuffle(neighbor_set.begin(), neighbor_set.end(), g);
+            }
+            
+            node_eval_counts[i] = evaluate_num;
+            eval_offsets[i] = total_evaluations;
+            
+            // Add node-neighbor pairs
+            for(int j = 0; j < evaluate_num; j++) {
+                node_ids.push_back(v_id);
+                neighbor_ids.push_back(neighbor_set[j]);
+            }
+            
+            total_evaluations += evaluate_num;
+        }
+        
+        if(total_evaluations == 0) {
+            // Add zero results for nodes with no neighbors
+            for(size_t i = 0; i < chunk_size; i++) {
+                all_results.push_back(0.0f);
+            }
+            continue;
+        }
+        
+        // Step 2: Allocate GPU memory for direct indexing
+        vertex_id_t* d_node_ids = nullptr;
+        vertex_id_t* d_neighbor_ids = nullptr;
+        vertex_id_t* d_id2offset_gpu = nullptr;
+        float* d_results = nullptr;
+        
+        checkCUDAerr(cudaMalloc((void**)&d_node_ids, total_evaluations * sizeof(vertex_id_t)));
+        checkCUDAerr(cudaMalloc((void**)&d_neighbor_ids, total_evaluations * sizeof(vertex_id_t)));
+        checkCUDAerr(cudaMalloc((void**)&d_id2offset_gpu, vocab_size * sizeof(vertex_id_t)));
+        checkCUDAerr(cudaMalloc((void**)&d_results, total_evaluations * sizeof(float)));
+        
+        // Step 3: Copy data to GPU
+        checkCUDAerr(cudaMemcpy(d_node_ids, node_ids.data(), 
+                               total_evaluations * sizeof(vertex_id_t), cudaMemcpyHostToDevice));
+        checkCUDAerr(cudaMemcpy(d_neighbor_ids, neighbor_ids.data(), 
+                               total_evaluations * sizeof(vertex_id_t), cudaMemcpyHostToDevice));
+        checkCUDAerr(cudaMemcpy(d_id2offset_gpu, id2offset.data(), 
+                               vocab_size * sizeof(vertex_id_t), cudaMemcpyHostToDevice));
+        
+        // Step 4: Launch optimized GPU kernel (NO MEMORY COPIES!)
+        if(use_optimized_kernel) {
+            // Use shared memory optimized version
+            int threadsPerBlock = layer1_size > 200 ? 256 : 128;
+            int blocks = total_evaluations;
+            size_t sharedMemSize = 3 * threadsPerBlock * sizeof(float);
+            
+            batch_similarity_direct_index_optimized_kernel<<<blocks, threadsPerBlock, sharedMemSize>>>(
+                d_syn0, d_node_ids, d_neighbor_ids, d_results, 
+                layer1_size, total_evaluations, d_id2offset_gpu);
+        } else {
+            // Use simple version
+            int threadsPerBlock = 256;
+            int blocks = (total_evaluations + threadsPerBlock - 1) / threadsPerBlock;
+            
+            batch_similarity_direct_index_kernel<<<blocks, threadsPerBlock>>>(
+                d_syn0, d_node_ids, d_neighbor_ids, nullptr, nullptr, 
+                d_results, layer1_size, total_evaluations, d_id2offset_gpu);
+        }
+        
+        cudaDeviceSynchronize();
+        
+        // Step 5: Copy results back and compute averages
+        float* h_results = new float[total_evaluations];
+        checkCUDAerr(cudaMemcpy(h_results, d_results, 
+                               total_evaluations * sizeof(float), cudaMemcpyDeviceToHost));
+        
+        // Step 6: Compute average similarity for each node
+        for(size_t i = 0; i < chunk_size; i++) {
+            int evaluate_num = node_eval_counts[i];
+            int offset = eval_offsets[i];
+            
+            if(evaluate_num == 0) {
+                all_results.push_back(0.0f);
+                continue;
+            }
+            
+            float sum_similarity = 0.0f;
+            for(int j = 0; j < evaluate_num; j++) {
+                sum_similarity += h_results[offset + j];
+            }
+            
+            float avg_similarity = sum_similarity / evaluate_num;
+            all_results.push_back(avg_similarity);
+        }
+        
+        // Cleanup GPU memory
+        cudaFree(d_node_ids);
+        cudaFree(d_neighbor_ids);
+        cudaFree(d_id2offset_gpu);
+        cudaFree(d_results);
+        delete[] h_results;
+    }
+    
+    printf("[ %d ] GPU Direct Index: Completed processing %zu nodes\n", my_rank, all_results.size());
+    return all_results;
+}
+// ========================================================
 
 float find_supernode_topK_accurancy(float p,int k,myEdgeContainer*csr){
   float top_sum = 0;
@@ -1888,9 +2175,20 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
       printf("[ %d ] Found %zu nodes to evaluate\n", my_rank, nodes_to_evaluate.size());
       
       if(!nodes_to_evaluate.empty()){
-        // Step 2: Batch process all nodes
-        std::vector<float> similarities = batch_node_neighbor_average_cos_sim_chunked(
-          nodes_to_evaluate, csr, d_A_batch, d_B_batch, d_results_batch, batch_size);
+        // Step 2: Batch process all nodes with configurable implementation
+        std::vector<float> similarities;
+        
+        if(use_gpu_direct_indexing) {
+          // NEW: GPU-side direct indexing (eliminates memory copy bottleneck)
+          printf("[ %d ] Using GPU Direct Indexing optimization\n", my_rank);
+          similarities = batch_node_neighbor_direct_index(
+            nodes_to_evaluate, csr, batch_size, use_optimized_direct_kernel);
+        } else {
+          // ORIGINAL: Memory copy based batch processing (preserved for comparison)
+          printf("[ %d ] Using original memory-copy batch processing\n", my_rank);
+          similarities = batch_node_neighbor_average_cos_sim_chunked(
+            nodes_to_evaluate, csr, d_A_batch, d_B_batch, d_results_batch, batch_size);
+        }
         
         // Step 3: Apply results and count non-converged nodes
         int converged_count = 0;
