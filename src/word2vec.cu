@@ -975,6 +975,10 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
                 (window, layer1_size, negative, vocab_size, alpha,
                  d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
                 break;
+      case 20: __sgNegReuse<20><<<gDim, bDimNeg>>>
+                (window, layer1_size, negative, vocab_size, alpha,
+                 d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
+                break;
       case 50: __sgNegReuse<50><<<gDim, bDimNeg>>>
                 (window, layer1_size, negative, vocab_size, alpha,
                  d_sen, d_sent_len, d_syn1, d_syn0, d_negSample);
@@ -1025,20 +1029,18 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
 volatile bool halt_sync = false;
 volatile bool pause_sync = false;
 void all_sync(){
-      checkCUDAerr(cudaMemcpy(syn0,
-            d_syn0 ,
-            (size_t)vocab_size * layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
+    // REVERTED: Back to simple averaging - all nodes train same vocabulary
+    checkCUDAerr(cudaMemcpy(syn0, d_syn0, (size_t)vocab_size * layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
     checkCUDAerr(cudaDeviceSynchronize());
-    MPI_Allreduce(MPI_IN_PLACE, syn0,
-            (size_t)vocab_size* layer1_size , MPI_FLOAT, MPI_SUM, MPI_EMB_COMM);
+    
+    MPI_Allreduce(MPI_IN_PLACE, syn0, (size_t)vocab_size* layer1_size , MPI_FLOAT, MPI_SUM, MPI_EMB_COMM);
+    
     for(size_t i = 0; i < (size_t) vocab_size * layer1_size;i++){
         syn0[i] /= num_procs;
     }
-      checkCUDAerr(cudaMemcpy(d_syn0,
-            syn0 ,
-            (size_t)vocab_size * layer1_size * sizeof(float), cudaMemcpyHostToDevice));
+    
+    checkCUDAerr(cudaMemcpy(d_syn0, syn0, (size_t)vocab_size * layer1_size * sizeof(float), cudaMemcpyHostToDevice));
     checkCUDAerr(cudaDeviceSynchronize());
-
 }
 double sync_spend_time = 0.0f;
 double actual_training_time = 0.0;
@@ -1051,30 +1053,38 @@ void sync_embedding_func()
   }
   
   Timer sync_timer;
-  // chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000);
+  int wait_time = 1000;
+  chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(wait_time);
   int sync_times = 1;
   while(!halt_sync)
   {
-    usleep(100000); // 100ms instead of 1s for faster sync frequency
+    sleep(1);
+    // usleep(100000); // 100ms instead of 1s for faster sync frequency
     // if(true == pause_sync) {
     //   syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000); // next sync time.
     // }
-    // unique_lock<std::mutex> lock(sync_mtx);
+    unique_lock<std::mutex> lock(sync_mtx);
     //wait_until syncTime.
-    // sync_cv.wait_until(lock,syncTime);
+    sync_cv.wait_until(lock,syncTime);
 
     if(halt_sync == true) break;
 
-    // if(true == pause_sync) {
-    //   syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000); // next sync time.
-    //   continue;
-    // }
+    if(true == pause_sync) {
+      syncTime = chrono::steady_clock::now() + chrono::milliseconds(wait_time); // next sync time.
+      continue;
+    }
     //block the training thread; 
     trainBlocked = true;
 
     sync_timer.restart();
     // all_sync();
-    // sync_spend_time += sync_timer.duration();
+    sync_spend_time += sync_timer.duration();
+
+    // trainBlocked = false; // unblock the training thread.
+    // sync_cv.notify_one(); // wake trainer
+    // printf("[ %d ] Full sync completed, sync times: %d\n", my_rank, sync_times++);
+    // syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000); // next sync time
+    // continue; // 继续下一次同步循环，跳过部分同步逻辑
     
     // copyFrom GPU, MPI, write back to GPU 
     //  No.1 pick up the sync id;
@@ -1134,7 +1144,7 @@ void sync_embedding_func()
     }
     checkCUDAerr(cudaDeviceSynchronize());
     sync_spend_time += sync_timer.duration(); 
-    // syncTime = chrono::steady_clock::now() + chrono::milliseconds(100); // next sync time.
+    syncTime = chrono::steady_clock::now() + chrono::milliseconds(wait_time); // next sync time.
     trainBlocked = false; // unblock the traing thread.
     sync_cv.notify_one(); // wake trainer
     printf("[ %d ] Syncing Times No.%d, sync %d nodes\n",my_rank,sync_times++, sync_node_num);
@@ -1329,6 +1339,7 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   
   while (corpus_index < corpus_data.size()) {
     // 多进程环境下才需要等待同步
+    // OPTIMIZATION: No need to wait for sync during training
     if (num_procs > 1) {
       unique_lock<mutex> lock(sync_mtx);
       sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
@@ -2184,9 +2195,9 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     std::cout << std::endl;
     
     vertex_id_t eva_num = 0;
-    
+    printf("init_round: %d\n",init_round);
     if(train_iter >= init_round){
-      printf("[ %d ] evaluation start\n", my_rank);
+      printf("[ %d ] evaluation start (with synchronized embeddings)\n", my_rank);
       
       Timer eva_timer;
       // Step 1: Collect all nodes that need evaluation
@@ -2292,14 +2303,14 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     evaluate_spend_time = total_eval_time;
   }
   
-  // 只在多进程模式下停止同步线程
-  if (num_procs > 1) {
-    MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+  // OPTIMIZATION: No sync thread to clean up since we disabled training-time sync
+  if (num_procs > 1 && sync_thread != nullptr) {
+    MPI_Barrier(MPI_EMB_COMM);
     halt_sync = true;
     sync_cv.notify_all();
     printf("[ %d ] Waiting Syncing Thread\n",my_rank);
     sync_thread->join();
-    MPI_Barrier(MPI_EMB_COMM);// stop sync thread until all the sync thread is ready to be halted
+    MPI_Barrier(MPI_EMB_COMM);
     printf("[ %d ] Syncing Thread Halt\n",my_rank);
     delete sync_thread;
   }
