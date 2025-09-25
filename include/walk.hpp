@@ -22,6 +22,7 @@ extern vector<int> vertex_walker_stop_flag;
 extern std::mutex mtx;
 extern std::condition_variable cv;
 extern bool hasResource ;
+double walking_time = 0.0;
 using namespace std; 
 
 using precision_t = double;
@@ -461,6 +462,13 @@ public:
 
 public:
     double other_time = 0.0;
+
+    double assemble_time = 0.0;
+    double compress_time = 0.0;
+    double dump_time = 0.0;
+    double walk_time = 0.0;
+    double waiting_time = 0.0;
+
     double msg_time = 0.0;
     partition_id_t get_local_partition_id()
     {
@@ -626,6 +634,7 @@ public:
     template<typename query_data_t, typename response_data_t, typename transition_config_t>
     void internal_random_walk(WalkerConfig<edge_data_t, walker_data_t> *walker_config, transition_config_t *transition_config, WalkConfig* walk_config, int order)
     {
+        Timer actual_walking_timer;
         typedef Walker<walker_data_t> walker_t;
         typedef Message<walker_t> walker_msg_t;
 
@@ -667,16 +676,22 @@ public:
         
         // Round-level timing statistics
         std::vector<double> round_walk_times;
-        std::vector<double> round_corpus_times;
+        std::vector<double> round_dump_times;
         std::vector<double> round_wait_times;
+        std::vector<double> round_KL_times;
+        std::vector<double> round_compress_timtes;
+        std::vector<double> total_round_times;
         
         while (remained_walker != 0)
         {
             Timer round_timer;  // Timer for entire round
             Timer walk_step_timer;  // Timer for walk execution only
             double current_walk_time = 0.0;
-            double corpus_gen_time = 0.0;
+            double corpus_dump_time = 0.0;
             double wait_time = 0.0;
+            double KL_time = 0.0;
+            double test_time = 0.0;
+            double compress_time = 0.0;
             
             printf("\n【 %d Round %d Started】 \n",get_mpi_rank(),iter);
             
@@ -702,15 +717,18 @@ public:
                 }
             }
 
+            Timer test_timer;
             walk_step_timer.restart(); // Start timing the actual walk execution
             internal_walk_epoch(&walk_data, walker_config, transition_config);
             current_walk_time = walk_step_timer.duration();
+            this->walk_time += current_walk_time;
 
             if (walk_data.collect_path_flag)
             {
                 Timer timer_ap;
                 auto* paths = walk_data.pc->assemble_path(walker_begin);
                 this->other_time+= timer_ap.duration();
+                this->assemble_time += timer_ap.duration();
 
                 if (walk_config->output_file_flag)
                 {
@@ -723,8 +741,9 @@ public:
                     string local_output_path = walk_config->output_path_prefix +"-" + s_rank+"-"+s_iter+".txt";
                     Timer timer_dump;
                     paths->dump(local_output_path.c_str(), "w", walk_config->print_with_head_info, context_map_freq,this->local_corpus,this->vertex_cn,this->co_occor);
-                    corpus_gen_time = timer_dump.duration();
-                    this->other_time += corpus_gen_time;
+                    corpus_dump_time = timer_dump.duration();
+                    this->other_time += corpus_dump_time;
+                    this->dump_time += timer_dump.duration();
                     
                     Timer wait_timer;
                     unique_lock<mutex> lock(mtx);
@@ -733,6 +752,8 @@ public:
                     
                     // if hasResource = true, then block the walking
                     hasResource = true;
+                    
+                    Timer compress_timer;
                     size_t corpus_size = this->local_corpus.size();  // Save size before move
                     
                     // Calculate compression statistics before move
@@ -751,9 +772,15 @@ public:
                     }
                     
                     this->out_queue.push(std::move(this->local_corpus));  // Use move semantics to avoid copying
+                    compress_time = compress_timer.duration();
+                    this->compress_time += compress_time;
+                    printf("this->compress_time: %.3fs, compress_time: %.3f", this->compress_time,compress_time);
+
                     cv.notify_one();
-                    cout<< get_mpi_rank()<<"  =========== [ ROUND " << iter << " ] PUSH CORPUS DATA (size: " << corpus_size << "), Walk: " << current_walk_time << "s, Corpus: " << corpus_gen_time << "s, Wait: " << wait_time << "s ======" <<endl;
-                    
+                    test_time = test_timer.duration();
+                    printf("test_time:%.3f\n",test_time);
+                    cout<< get_mpi_rank()<<"  =========== [ ROUND " << iter << " ] PUSH CORPUS DATA (size: " << corpus_size << "), Walk: " << current_walk_time << "s, Corpus: " << corpus_dump_time << "s, Wait: " << wait_time << "s ======" <<endl;
+                    Timer KL_timer;
                     MPI_Allreduce(context_map_freq.data(),  this->vertex_freq, this->v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
                     uint64_t words_sum = 0;
                     uint64_t degree_sum = 0;
@@ -796,15 +823,19 @@ public:
                     {
                         std::cout << "Delat RE：" << abs(delta_H) << std::endl;
                     }
-                    
+                    KL_time = KL_timer.duration();
+                    // test_time = test_timer.duration();
                     // Record round timing statistics
                     double total_round_time = round_timer.duration();
                     if (walk_config->output_file_flag) {
                         round_walk_times.push_back(current_walk_time);
-                        round_corpus_times.push_back(corpus_gen_time);
+                        round_dump_times.push_back(corpus_dump_time);
                         round_wait_times.push_back(wait_time);
-                        printf("[ %d ] === ROUND %d COMPLETED === Total: %.3fs, Walk: %.3fs, Corpus: %.3fs, Wait: %.3fs\n", 
-                               get_mpi_rank(), iter, total_round_time, current_walk_time, corpus_gen_time, wait_time);
+                        round_KL_times.push_back(KL_time);
+                        round_compress_timtes.push_back(compress_time);
+                        total_round_times.push_back(total_round_time);
+                        printf("[ %d ] === ROUND %d COMPLETED === Total: %.3fs, Walk: %.3fs, Corpus: %.3fs, Wait: %.3fs, KL: %.3fs, Compress: %.3fs\n", 
+                               get_mpi_rank(), iter, total_round_time, current_walk_time, corpus_dump_time, wait_time, KL_time,compress_time);
                     }
                     
                     // iter = iter == 0 ? init_round + 1 : iter + 1;
@@ -855,29 +886,40 @@ public:
         // Print detailed round-level timing statistics
         if (!round_walk_times.empty()) {
             printf("\n================== [ %d ] ROUND-LEVEL TIMING STATISTICS ==================\n", get_mpi_rank());
-            double total_walk_time = 0.0, total_corpus_time = 0.0, total_wait_time = 0.0;
-            
+            double total_walk_time = 0.0, total_dump_time = 0.0, total_wait_time = 0.0, other_time = 0.0, total_time = 0.0;
+            double total_KL_time = 0.0,total_Compress_time=0.0;
+
+
             for (size_t i = 0; i < round_walk_times.size(); i++) {
                 total_walk_time += round_walk_times[i];
-                total_corpus_time += round_corpus_times[i];
+                total_dump_time += round_dump_times[i];
                 total_wait_time += round_wait_times[i];
-                printf("Round %2zu: Walk=%.3fs, Corpus=%.3fs, Wait=%.3fs, Total=%.3fs\n", 
-                       i+1, round_walk_times[i], round_corpus_times[i], round_wait_times[i],
-                       round_walk_times[i] + round_corpus_times[i] + round_wait_times[i]);
+                total_KL_time += round_KL_times[i];
+                total_Compress_time += round_compress_timtes[i];
+                total_time += total_round_times[i];
+                other_time = total_round_times[i] - (round_walk_times[i] + round_dump_times[i] + round_wait_times[i]+ round_KL_times[i]+round_compress_timtes[i]);
+                printf("Round %2zu: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Other=%.3fs, Total=%.3fs\n",
+                       i+1, round_walk_times[i], round_dump_times[i], round_wait_times[i],
+                       round_KL_times[i],round_compress_timtes[i],other_time,
+                       total_round_times[i]);
             }
             
             printf("========================================================================\n");
-            printf("SUMMARY: Rounds=%zu, Walk=%.3fs, Corpus=%.3fs, Wait=%.3fs, Total=%.3fs\n",
-                   round_walk_times.size(), total_walk_time, total_corpus_time, total_wait_time,
-                   total_walk_time + total_corpus_time + total_wait_time);
-            printf("AVERAGES: Walk=%.3fs, Corpus=%.3fs, Wait=%.3fs per round\n",
-                   total_walk_time/round_walk_times.size(), total_corpus_time/round_walk_times.size(),
-                   total_wait_time/round_walk_times.size());
+            other_time = total_time - (total_walk_time + total_dump_time + total_wait_time + total_KL_time);
+            printf("SUMMARY: Rounds=%zu, Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Other=%.3fs, Total=%.3fs\n",
+                   round_walk_times.size(), total_walk_time, total_dump_time, total_wait_time,total_KL_time,total_Compress_time,other_time,
+                   total_time);
+            printf("AVERAGES: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs ,KL=%.3fs , Compress=%.3fs per round,  Other=%.3fs\n",
+                   total_walk_time/round_walk_times.size(), total_dump_time/round_walk_times.size(),
+                   total_wait_time/round_walk_times.size(), total_KL_time/round_walk_times.size(), total_Compress_time/round_walk_times.size(),other_time/round_walk_times.size());
+            this->waiting_time = total_wait_time;
             printf("========================================================================\n\n");
         }
 
         this->dealloc_array(walk_data.local_walkers, walker_array_size);
         this->dealloc_array(walk_data.local_walkers_bak, walker_array_size);
+        walking_time = actual_walking_timer.duration();
+        printf("[ %d ] ALL ROUNDS COMPLETED, Actual Walking Time: %.3fs\n", get_mpi_rank(), walking_time);
     }
 
     void internal_random_walk_wrap (WalkerConfig<edge_data_t, walker_data_t> *walker_config, TransitionConfig<edge_data_t, walker_data_t> *transition_config, WalkConfig *walk_config)
