@@ -1361,6 +1361,9 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   Timer sequence_processing_timer;
   Timer vocab_conversion_timer;
   Timer subsampling_timer;
+  Timer subsampling_prob_timer;
+  Timer subsampling_rng_timer;
+  Timer subsampling_compare_timer;
   Timer sentence_building_timer;
   Timer seq_other_timer;
   Timer wait_sync_timer;
@@ -1369,8 +1372,11 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   double sequence_processing_time = 0.0;
   double total_vocab_conversion_time = 0.0;
   double total_subsampling_time = 0.0;
+  double total_subsampling_prob_time = 0.0;
+  double total_subsampling_rng_time = 0.0;
+  double total_subsampling_compare_time = 0.0;
   double total_sentence_building_time = 0.0;
-  double seq_other_time = 0.0;
+  double total_sequence_other_time = 0.0;
   double wait_sync_time = 0.0;
   double negative_sampling_time = 0.0;
   
@@ -1406,10 +1412,15 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
       const auto& sequence = corpus_data[corpus_index];
       int temp_sent_len = 0;
       seq_other_timer.restart();
+      double iter_vocab_time = 0.0;
+      double iter_subsampling_time = 0.0;
+      double iter_sentence_building_time = 0.0;
       for (auto vertex_id : sequence) {
         vocab_conversion_timer.restart();
         word = id2offset[vertex_id];  // Convert vertex ID to vocab index
-        total_vocab_conversion_time += vocab_conversion_timer.duration();
+        double vocab_time = vocab_conversion_timer.duration();
+        total_vocab_conversion_time += vocab_time;
+        iter_vocab_time += vocab_time;
         if (word == -1) {
           continue;
         }
@@ -1421,20 +1432,42 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
 
         if (sample > 0) {
           subsampling_timer.restart();
+          subsampling_prob_timer.restart();
           float ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
+          double prob_time = subsampling_prob_timer.duration();
+          total_subsampling_prob_time += prob_time;
+
+          subsampling_rng_timer.restart();
           int next_random_t = rand();
-          total_subsampling_time += subsampling_timer.duration();
-          if (ran < (next_random_t & 0xFFFF) / (float)65536) continue;
+          double rng_time = subsampling_rng_timer.duration();
+          total_subsampling_rng_time += rng_time;
+
+          subsampling_compare_timer.restart();
+          bool discard_token = ran < (next_random_t & 0xFFFF) / 65536.0f;
+          double compare_time = subsampling_compare_timer.duration();
+          total_subsampling_compare_time += compare_time;
+
+          double subsampling_time = subsampling_timer.duration();
+          total_subsampling_time += subsampling_time;
+          iter_subsampling_time += subsampling_time;
+          if (discard_token) continue;
         }
 
         sentence_building_timer.restart();
         sen[total_sent_len] = word;
         total_sent_len++;
         temp_sent_len++;
-        total_sentence_building_time += sentence_building_timer.duration();
+        double sentence_time = sentence_building_timer.duration();
+        total_sentence_building_time += sentence_time;
+        iter_sentence_building_time += sentence_time;
         if (temp_sent_len >= MAX_SENTENCE_LENGTH) break;
       }
-      seq_other_time += seq_other_timer.duration();
+      double iter_total_time = seq_other_timer.duration();
+      double iter_other_time = iter_total_time - iter_vocab_time - iter_subsampling_time - iter_sentence_building_time;
+      if (iter_other_time < 0.0) {
+        iter_other_time = 0.0;
+      }
+      total_sequence_other_time += iter_other_time;
       // Check if sentence ended with word 0, matching file mode behavior
       if (word == 0) {
         word_count++;
@@ -1496,8 +1529,18 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   printf("[ %d ] - Sequence processing: %.6f seconds (%.2f%%)\n", my_rank, sequence_processing_time, sequence_processing_time / total_corpus_read_time * 100);
   printf("[ %d ]    - Vocab ID conversion: %.6f seconds (%.2f%%)\n", my_rank, total_vocab_conversion_time, total_vocab_conversion_time / total_corpus_read_time * 100);
   printf("[ %d ]    - Subsampling computation: %.6f seconds (%.2f%%)\n", my_rank, total_subsampling_time, total_subsampling_time / total_corpus_read_time * 100);
+  if (total_subsampling_time > 0.0) {
+    printf("[ %d ]      * Prob calc          : %.6f seconds (%.2f%% of subsampling)\n", my_rank, total_subsampling_prob_time, total_subsampling_prob_time / total_subsampling_time * 100);
+    printf("[ %d ]      * RNG               : %.6f seconds (%.2f%% of subsampling)\n", my_rank, total_subsampling_rng_time, total_subsampling_rng_time / total_subsampling_time * 100);
+    printf("[ %d ]      * Compare threshold : %.6f seconds (%.2f%% of subsampling)\n", my_rank, total_subsampling_compare_time, total_subsampling_compare_time / total_subsampling_time * 100);
+    double total_subsampling_other_time = total_subsampling_time - total_subsampling_prob_time - total_subsampling_rng_time - total_subsampling_compare_time;
+    if (total_subsampling_other_time < 0.0) {
+      total_subsampling_other_time = 0.0;
+    }
+    printf("[ %d ]      * Other subsample ops: %.6f seconds (%.2f%% of subsampling)\n", my_rank, total_subsampling_other_time, total_subsampling_other_time / total_subsampling_time * 100);
+  }
   printf("[ %d ]    - Sentence building: %.6f seconds (%.2f%%)\n", my_rank, total_sentence_building_time, total_sentence_building_time / total_corpus_read_time * 100);
-  printf("[ %d ]    - other time  : %.6f seconds (%.2f%%)\n", my_rank, seq_other_time, seq_other_time / total_corpus_read_time * 100);
+  printf("[ %d ]    - Other sequence ops: %.6f seconds (%.2f%%)\n", my_rank, total_sequence_other_time, total_sequence_other_time / total_corpus_read_time * 100);
   printf("[ %d ] - wait syncing : %.6f seconds (%.2f%%)\n", my_rank, wait_sync_time, wait_sync_time / total_corpus_read_time * 100);
   printf("[ %d ] - Negative sampling: %.6f seconds (%.2f%%)\n", my_rank, negative_sampling_time, negative_sampling_time / total_corpus_read_time * 100);
 
