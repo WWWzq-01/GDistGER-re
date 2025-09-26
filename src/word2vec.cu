@@ -9,6 +9,8 @@
 #include <string.h>
 #include <math.h>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <cuda_runtime.h>
 #include "gemini/core/mpi.hpp"
 #include "type.hpp"
@@ -91,6 +93,31 @@ bool use_gpu_direct_indexing = true;
 
 // Toggle between simple and shared-memory optimized kernel for direct indexing
 // Only used when use_gpu_direct_indexing = true
+
+namespace {
+constexpr uint16_t kFullKeepThreshold = std::numeric_limits<uint16_t>::max();
+
+struct FastRandomState {
+  unsigned long long state;
+  explicit FastRandomState(unsigned long long seed = 1ULL) : state(seed ? seed : 1ULL) {}
+  inline uint32_t Next32() {
+    state = state * 25214903917ULL + 11ULL;
+    return static_cast<uint32_t>(state >> 16);
+  }
+  inline uint16_t Next16() {
+    return static_cast<uint16_t>(Next32() >> 16);
+  }
+};
+
+inline unsigned long long InitSeedForRank(int rank, unsigned long long extra = 0ULL) {
+  unsigned long long seed = 0x9E3779B97F4A7C15ULL ^ ((static_cast<unsigned long long>(rank) + 1ULL) << 1) ^ extra;
+  if (seed == 0ULL) {
+    seed = 1ULL;
+  }
+  return seed;
+}
+}
+
 bool use_optimized_direct_kernel = true;
 // ========================================================
 
@@ -116,6 +143,40 @@ int *vocab_codelen, *vocab_point, *d_vocab_codelen, *d_vocab_point;
 char *vocab_code, *d_vocab_code;
 int *d_table;
 float *d_syn0, *d_syn1, *d_expTable;
+
+static std::vector<uint16_t> BuildSubsamplingThresholds(double sample_value, long long total_train_words) {
+  std::vector<uint16_t> thresholds;
+  if (sample_value <= 0.0 || total_train_words <= 0) {
+    return thresholds;
+  }
+  const double sample_train_words = sample_value * static_cast<double>(total_train_words);
+  if (sample_train_words <= 0.0) {
+    return thresholds;
+  }
+  if (vocab_size <= 0) {
+    return thresholds;
+  }
+  thresholds.resize(static_cast<size_t>(vocab_size), kFullKeepThreshold);
+  for (long long i = 0; i < vocab_size; ++i) {
+    long long count = vocab[i].cn;
+    if (count <= 0) {
+      thresholds[static_cast<size_t>(i)] = kFullKeepThreshold;
+      continue;
+    }
+    double prob = (sqrt(count / sample_train_words) + 1.0) * (sample_train_words / static_cast<double>(count));
+    if (prob > 1.0) {
+      prob = 1.0;
+    } else if (prob < 0.0) {
+      prob = 0.0;
+    }
+    if (prob >= 1.0) {
+      thresholds[static_cast<size_t>(i)] = kFullKeepThreshold;
+    } else {
+      thresholds[static_cast<size_t>(i)] = static_cast<uint16_t>(prob * 65535.0 + 0.5);
+    }
+  }
+  return thresholds;
+}
 
 __device__ float reduceInWarp(float f) {
   for (int i=warpSize/2; i>0; i/=2) {
@@ -1184,6 +1245,19 @@ void TrainModelThread(string data_path)
   int *d_negSample;
   checkCUDAerr(cudaMalloc(&d_negSample, MAX_SENTENCE * negative * sizeof(int)));
 
+  Timer subsampling_precompute_timer;
+  std::vector<uint16_t> subsample_thresholds = BuildSubsamplingThresholds(sample, train_words);
+  double subsampling_precompute_time = subsampling_precompute_timer.duration();
+  if (!subsample_thresholds.empty()) {
+    printf("[ %d ] Subsampling thresholds built in %.6f seconds\n", my_rank, subsampling_precompute_time);
+  }
+  FastRandomState fast_rng(InitSeedForRank(my_rank, 0x1ULL));
+
+#ifndef CXX_UNLIKELY
+#define CXX_UNLIKELY(x) (__builtin_expect(!!(x), 0))
+#endif
+
+
   while (reduSize < layer1_size) {
     reduSize *= 2;
   }
@@ -1242,10 +1316,14 @@ void TrainModelThread(string data_path)
           word_count++;
           break;
         }
-        if (sample > 0) {
-          float ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
-          int next_random_t = rand();
-          if (ran < (next_random_t & 0xFFFF) / (float)65536) continue;
+        if (!subsample_thresholds.empty()) {
+          const uint16_t keep_threshold = subsample_thresholds[word];
+          if (CXX_UNLIKELY(keep_threshold < kFullKeepThreshold)) {
+            uint16_t random16 = fast_rng.Next16();
+            if (random16 > keep_threshold) {
+              continue;
+            }
+          }
         }
         sen[total_sent_len] = word;
         total_sent_len++;
@@ -1277,11 +1355,14 @@ void TrainModelThread(string data_path)
     }
 
     // Negative sampling in advance. A sentence shares negative samples
-    for (int i=0; i<cnt_sentence * negative; i++) {
-      int randd = rand();
+    for (int i = 0; i < cnt_sentence * negative; i++) {
+      uint32_t randd = fast_rng.Next32();
       int tempSample = table[randd % table_size];
-      if (tempSample == 0) negSample[i] = randd % (vocab_size - 1) + 1;
-      else                 negSample[i] = tempSample;
+      if (tempSample == 0) {
+        negSample[i] = static_cast<int>(randd % (vocab_size - 1)) + 1;
+      } else {
+        negSample[i] = tempSample;
+      }
     }
     checkCUDAerr(cudaMemcpy(d_negSample, negSample, cnt_sentence * negative * sizeof(int), cudaMemcpyHostToDevice));
     cudaError_t cet = cudaMemcpy(d_sen, sen, total_sent_len * sizeof(int), cudaMemcpyHostToDevice);
@@ -1340,6 +1421,14 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   int *negSample = (int *)malloc(MAX_SENTENCE * negative * sizeof(int));
   int *d_negSample;
   checkCUDAerr(cudaMalloc(&d_negSample, MAX_SENTENCE * negative * sizeof(int)));
+
+  Timer subsampling_precompute_timer;
+  std::vector<uint16_t> subsample_thresholds = BuildSubsamplingThresholds(sample, train_words);
+  double subsampling_precompute_time = subsampling_precompute_timer.duration();
+  if (!subsample_thresholds.empty()) {
+    printf("[ %d ] Subsampling thresholds built in %.6f seconds\n", my_rank, subsampling_precompute_time);
+  }
+  FastRandomState fast_rng(InitSeedForRank(my_rank, 0x2ULL));
 
   while (reduSize < layer1_size) {
     reduSize *= 2;
@@ -1430,27 +1519,29 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
           break;  // End of sentence
         }
 
-        if (sample > 0) {
-          subsampling_timer.restart();
-          subsampling_prob_timer.restart();
-          float ran = (sqrt(vocab[word].cn / (sample * train_words)) + 1) * (sample * train_words) / vocab[word].cn;
-          double prob_time = subsampling_prob_timer.duration();
-          total_subsampling_prob_time += prob_time;
+        if (!subsample_thresholds.empty()) {
+          const uint16_t keep_threshold = subsample_thresholds[word];
+          if (CXX_UNLIKELY(keep_threshold < kFullKeepThreshold)) {
+            subsampling_timer.restart();
+            subsampling_prob_timer.restart();
+            double prob_time = subsampling_prob_timer.duration();
+            total_subsampling_prob_time += prob_time;
 
-          subsampling_rng_timer.restart();
-          int next_random_t = rand();
-          double rng_time = subsampling_rng_timer.duration();
-          total_subsampling_rng_time += rng_time;
+            subsampling_rng_timer.restart();
+            uint16_t random16 = fast_rng.Next16();
+            double rng_time = subsampling_rng_timer.duration();
+            total_subsampling_rng_time += rng_time;
 
-          subsampling_compare_timer.restart();
-          bool discard_token = ran < (next_random_t & 0xFFFF) / 65536.0f;
-          double compare_time = subsampling_compare_timer.duration();
-          total_subsampling_compare_time += compare_time;
+            subsampling_compare_timer.restart();
+            bool discard_token = random16 > keep_threshold;
+            double compare_time = subsampling_compare_timer.duration();
+            total_subsampling_compare_time += compare_time;
 
-          double subsampling_time = subsampling_timer.duration();
-          total_subsampling_time += subsampling_time;
-          iter_subsampling_time += subsampling_time;
-          if (discard_token) continue;
+            double subsampling_time = subsampling_timer.duration();
+            total_subsampling_time += subsampling_time;
+            iter_subsampling_time += subsampling_time;
+            if (discard_token) continue;
+          }
         }
 
         sentence_building_timer.restart();
@@ -1485,10 +1576,13 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
     // Generate negative samples (match file mode behavior)
     negative_sampling_timer.restart();
     for (int i = 0; i < cnt_sentence * negative; i++) {
-      int randd = rand();
+      uint32_t randd = fast_rng.Next32();
       int tempSample = table[randd % table_size];
-      if (tempSample == 0) negSample[i] = randd % (vocab_size - 1) + 1;
-      else                 negSample[i] = tempSample;
+      if (tempSample == 0) {
+        negSample[i] = static_cast<int>(randd % (vocab_size - 1)) + 1;
+      } else {
+        negSample[i] = tempSample;
+      }
     }
     negative_sampling_time += negative_sampling_timer.duration();
 
