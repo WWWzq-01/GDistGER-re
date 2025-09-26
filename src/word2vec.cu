@@ -1354,12 +1354,35 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   double total_kernel_time = 0.0;
   double total_corpus_read_time = 0.0;
   double total_copy_time = 0.0;
+
+  // Process sentences from memory corpus
+  Timer corpus_read_timer;
+  // corpus read_timer breakdown
+  Timer sequence_processing_timer;
+  Timer vocab_conversion_timer;
+  Timer subsampling_timer;
+  Timer sentence_building_timer;
+  Timer seq_other_timer;
+  Timer wait_sync_timer;
+  Timer negative_sampling_timer;
+  // breakdown
+  double sequence_processing_time = 0.0;
+  double total_vocab_conversion_time = 0.0;
+  double total_subsampling_time = 0.0;
+  double total_sentence_building_time = 0.0;
+  double seq_other_time = 0.0;
+  double wait_sync_time = 0.0;
+  double negative_sampling_time = 0.0;
+  
   while (corpus_index < corpus_data.size()) {
+    corpus_read_timer.restart();
     // 多进程环境下才需要等待同步
     // OPTIMIZATION: No need to wait for sync during training
     if (num_procs > 1) {
+      wait_sync_timer.restart();
       unique_lock<mutex> lock(sync_mtx);
       sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
+      wait_sync_time += wait_sync_timer.duration();
     }
                                                               
     if (word_count - last_word_count > 10000) {
@@ -1377,37 +1400,24 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
     sentence_length[0] = 0;
     int cnt_sentence = 0;
 
-    // Process sentences from memory corpus
-    Timer corpus_read_timer;
-    Timer sequence_processing_timer;
-    Timer vocab_conversion_timer;
-    Timer subsampling_timer;
-    Timer sentence_building_timer;
-    Timer negative_sampling_timer;
-
-    double total_vocab_conversion_time = 0.0;
-    double total_subsampling_time = 0.0;
-    double total_sentence_building_time = 0.0;
 
     sequence_processing_timer.restart();
     while (cnt_sentence < MAX_SENTENCE && corpus_index < corpus_data.size()) {
       const auto& sequence = corpus_data[corpus_index];
       int temp_sent_len = 0;
-
+      seq_other_timer.restart();
       for (auto vertex_id : sequence) {
         vocab_conversion_timer.restart();
         word = id2offset[vertex_id];  // Convert vertex ID to vocab index
+        total_vocab_conversion_time += vocab_conversion_timer.duration();
         if (word == -1) {
-          total_vocab_conversion_time += vocab_conversion_timer.duration();
           continue;
         }
         word_count++;
         if (word == 0) {
           word_count++;  // Match file mode behavior
-          total_vocab_conversion_time += vocab_conversion_timer.duration();
           break;  // End of sentence
         }
-        total_vocab_conversion_time += vocab_conversion_timer.duration();
 
         if (sample > 0) {
           subsampling_timer.restart();
@@ -1424,7 +1434,7 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
         total_sentence_building_time += sentence_building_timer.duration();
         if (temp_sent_len >= MAX_SENTENCE_LENGTH) break;
       }
-
+      seq_other_time += seq_other_timer.duration();
       // Check if sentence ended with word 0, matching file mode behavior
       if (word == 0) {
         word_count++;
@@ -1435,7 +1445,7 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
       corpus_index++;
       if (total_sent_len >= (MAX_SENTENCE - 1) * 20) break;
     }
-    double sequence_processing_time = sequence_processing_timer.duration();
+    sequence_processing_time += sequence_processing_timer.duration();
 
     if (cnt_sentence == 0) break;
 
@@ -1447,7 +1457,7 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
       if (tempSample == 0) negSample[i] = randd % (vocab_size - 1) + 1;
       else                 negSample[i] = tempSample;
     }
-    double negative_sampling_time = negative_sampling_timer.duration();
+    negative_sampling_time += negative_sampling_timer.duration();
 
     double batch_read_time = corpus_read_timer.duration();
     total_corpus_read_time += batch_read_time;
@@ -1470,16 +1480,6 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   }
   cudaDeviceSynchronize();
 
-  // // Detailed time breakdown
-  // printf("\n[ %d ] === Corpus read time Detailed Time Breakdown ===\n", my_rank);
-  // printf("[ %d ] Total batch time: %.6f seconds\n", my_rank, batch_read_time);
-  // printf("[ %d ] - Sequence processing: %.6f seconds (%.2f%%)\n", my_rank, sequence_processing_time, sequence_processing_time / batch_read_time * 100);
-  // printf("[ %d ] - Vocab ID conversion: %.6f seconds (%.2f%%)\n", my_rank, total_vocab_conversion_time, total_vocab_conversion_time / batch_read_time * 100);
-  // printf("[ %d ] - Subsampling computation: %.6f seconds (%.2f%%)\n", my_rank, total_subsampling_time, total_subsampling_time / batch_read_time * 100);
-  // printf("[ %d ] - Sentence building: %.6f seconds (%.2f%%)\n", my_rank, total_sentence_building_time, total_sentence_building_time / batch_read_time * 100);
-  // printf("[ %d ] - Negative sampling: %.6f seconds (%.2f%%)\n", my_rank, negative_sampling_time, negative_sampling_time / batch_read_time * 100);
-
-
   printf("[ %d ] Total corpus read completed in %lf seconds \n", my_rank, total_corpus_read_time);
   corpus_read_time = total_corpus_read_time;
   printf("[ %d ] Total copy host to GPU completed in %lf seconds \n", my_rank, total_copy_time);
@@ -1489,6 +1489,17 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   checkCUDAerr(cudaMemcpy(syn0, d_syn0, vocab_size * layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
   emb_copy_d2h_time = d2h_timer.duration();
   printf("[ %d ] Copy embedding GPU to host completed in %lf seconds \n", my_rank, emb_copy_d2h_time);
+
+  // Detailed corpus read time breakdown
+  printf("\n[ %d ] === Corpus read time Detailed Time Breakdown ===\n", my_rank);
+  printf("[ %d ] Total corpus read completed in %lf seconds \n", my_rank, total_corpus_read_time);
+  printf("[ %d ] - Sequence processing: %.6f seconds (%.2f%%)\n", my_rank, sequence_processing_time, sequence_processing_time / total_corpus_read_time * 100);
+  printf("[ %d ]    - Vocab ID conversion: %.6f seconds (%.2f%%)\n", my_rank, total_vocab_conversion_time, total_vocab_conversion_time / total_corpus_read_time * 100);
+  printf("[ %d ]    - Subsampling computation: %.6f seconds (%.2f%%)\n", my_rank, total_subsampling_time, total_subsampling_time / total_corpus_read_time * 100);
+  printf("[ %d ]    - Sentence building: %.6f seconds (%.2f%%)\n", my_rank, total_sentence_building_time, total_sentence_building_time / total_corpus_read_time * 100);
+  printf("[ %d ]    - other time  : %.6f seconds (%.2f%%)\n", my_rank, seq_other_time, seq_other_time / total_corpus_read_time * 100);
+  printf("[ %d ] - wait syncing : %.6f seconds (%.2f%%)\n", my_rank, wait_sync_time, wait_sync_time / total_corpus_read_time * 100);
+  printf("[ %d ] - Negative sampling: %.6f seconds (%.2f%%)\n", my_rank, negative_sampling_time, negative_sampling_time / total_corpus_read_time * 100);
 
   // free memory
   free(sen);
