@@ -27,9 +27,18 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 // train
 extern double training_time;
 extern double saving_embedding_time;
+// TrainModel time breakdown
+extern double train_model_init_time;
+extern double pure_training_time;
 extern double corpus_read_time;
 extern double corpus_copy_h2d_time;
 extern double emb_copy_d2h_time;
+extern double training_loop_time_accum;
+extern double training_kernel_time;
+extern double sync_spend_time;
+extern double evaluate_spend_time;
+extern double train_wait_walk_time;
+extern double train_wait_sync_time;
 // walk
 extern double walking_time;
 
@@ -243,8 +252,18 @@ int main(int argc, char **argv)
         printf("6. Training time:               %lf s  (%.2f%% of total)\n", 
                training_time, (training_time/total_time)*100);
         printf("   - Memory-based training (no disk I/O)\n");
-        printf("   - Saving embeddings          %lf s\n", saving_embedding_time);
-        printf("   - Pure training execution time %lf s\n", training_time - saving_embedding_time);
+        printf("   - Saving embeddings                      %lf s  (%.2f%% of training_time)\n", saving_embedding_time, (saving_embedding_time/training_time)*100);
+        printf("   - Training Model intra initialization    %lf s  (%.2f%% of training_time)\n", train_model_init_time, (train_model_init_time/training_time)*100);
+        printf("   - Synchronization time                   %lf s  (%.2f%% of training_time)\n", sync_spend_time, (sync_spend_time/training_time)*100);
+        printf("   - Evaluation time                        %lf s  (%.2f%% of training_time)\n", evaluate_spend_time, (evaluate_spend_time/training_time)*100);
+        printf("   - Wait Walking time                      %lf s  (%.2f%% of training_time)\n", train_wait_walk_time, (train_wait_walk_time/training_time)*100);
+        printf("   - Pure training execution time           %lf s  (%.2f%% of training_time)\n",  pure_training_time, (pure_training_time/training_time)*100);
+        printf("        - Corpus read time                      %lf s   (%.2f%% of pure training)\n", corpus_read_time, (corpus_read_time/pure_training_time)*100);
+        printf("        - H2D copy time                         %lf s   (%.2f%% of pure training)\n", corpus_copy_h2d_time, (corpus_copy_h2d_time/pure_training_time)*100);
+        printf("        - Kernel execution time                 %lf s   (%.2f%% of pure training)\n", training_kernel_time, (training_kernel_time/pure_training_time)*100);
+        printf("        - Training loop time                    %lf s   (%.2f%% of pure training)\n", training_loop_time_accum, (training_loop_time_accum/pure_training_time)*100);
+        printf("        - Embedding copy back                   %lf s   (%.2f%% of pure training)\n", emb_copy_d2h_time, (emb_copy_d2h_time/pure_training_time)*100);
+        printf("        - Wait Synchronization time             %lf s   (%.2f%% of pure training)\n", train_wait_sync_time, (train_wait_sync_time/pure_training_time)*100);
         printf("---------------------------------------------------------------------\n");
         printf("*** MEMORY OPTIMIZATION ENABLED ***\n");
         printf("Corpus data passed directly through memory pipeline.\n");

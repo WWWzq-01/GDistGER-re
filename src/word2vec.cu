@@ -1112,9 +1112,15 @@ void all_sync(){
 double sync_spend_time = 0.0f;
 double training_time = 0.0;
 double saving_embedding_time = 0.0;
+double train_model_init_time = 0.0;
+double pure_training_time = 0.0;
+double train_wait_walk_time = 0.0;
+double train_wait_sync_time = 0.0;
 double corpus_read_time = 0.0;
 double corpus_copy_h2d_time = 0.0;
 double emb_copy_d2h_time = 0.0;
+double training_loop_time_accum = 0.0;
+double training_kernel_time = 0.0;
 
 double total_file_read_time = 0.0;
 
@@ -1440,12 +1446,16 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
 
   // Process corpus data directly from memory instead of reading from file
   size_t corpus_index = 0;
-  double total_kernel_time = 0.0;
   double total_corpus_read_time = 0.0;
   double total_copy_time = 0.0;
+  double total_kernel_time = 0.0;
+  double total_training_loop_time = 0.0;
 
   // Process sentences from memory corpus
   Timer corpus_read_timer;
+  Timer h2d_copy_timer;
+  Timer kernel_timer;
+  Timer total_training_timer;
   // corpus read_timer breakdown
   Timer sequence_processing_timer;
   Timer vocab_conversion_timer;
@@ -1470,6 +1480,7 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   double negative_sampling_time = 0.0;
   
   while (corpus_index < corpus_data.size()) {
+    total_training_timer.restart();
     corpus_read_timer.restart();
     // 多进程环境下才需要等待同步
     // OPTIMIZATION: No need to wait for sync during training
@@ -1589,32 +1600,38 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
     double batch_read_time = corpus_read_timer.duration();
     total_corpus_read_time += batch_read_time;
     // Copy data to GPU and run training
-    Timer copy_timer;
+    h2d_copy_timer.restart();
     checkCUDAerr(cudaMemcpy(d_sen, sen, total_sent_len * sizeof(int), cudaMemcpyHostToDevice));
     checkCUDAerr(cudaMemcpy(d_sent_len, sentence_length, (cnt_sentence + 1) * sizeof(int), cudaMemcpyHostToDevice));
     checkCUDAerr(cudaMemcpy(d_negSample, negSample, cnt_sentence * negative * sizeof(int), cudaMemcpyHostToDevice));
-    double copy_time = copy_timer.duration();
+    double copy_time = h2d_copy_timer.duration();
     printf("[ %d ] Corpus data copied to GPU in %lf seconds \n", my_rank, copy_time);
     total_copy_time += copy_time;
-    Timer kernel_timer;
+
+    kernel_timer.restart();
     if (cbow) {
       cbowKernel(d_sen, d_sent_len, alpha, cnt_sentence, reduSize);
     } else {
       sgKernel(d_sen, d_sent_len, d_negSample, alpha, cnt_sentence, reduSize);
     }
-    printf("[ %d ] Corpus kernel executed in %lf seconds \n", my_rank, kernel_timer.duration());
-    total_kernel_time += kernel_timer.duration();
+    double kernel_time = kernel_timer.duration();
+    printf("[ %d ] Corpus kernel executed in %lf seconds \n", my_rank, kernel_time);
+    total_kernel_time += kernel_time;
+    total_training_loop_time += total_training_timer.duration();
   }
   cudaDeviceSynchronize();
 
   printf("[ %d ] Total corpus read completed in %lf seconds \n", my_rank, total_corpus_read_time);
-  corpus_read_time = total_corpus_read_time;
+  corpus_read_time += total_corpus_read_time;
   printf("[ %d ] Total copy host to GPU completed in %lf seconds \n", my_rank, total_copy_time);
-  corpus_copy_h2d_time = total_copy_time;
+  corpus_copy_h2d_time += total_copy_time;
   printf("[ %d ] total kernel Corpus training completed in %lf seconds \n", my_rank, total_kernel_time);
+  training_kernel_time += total_kernel_time;
+  printf("[ %d ] Total training loop time accumulated %lf seconds \n", my_rank, total_training_loop_time);
+  training_loop_time_accum += total_training_loop_time;
   Timer d2h_timer;
   checkCUDAerr(cudaMemcpy(syn0, d_syn0, vocab_size * layer1_size * sizeof(float), cudaMemcpyDeviceToHost));
-  emb_copy_d2h_time = d2h_timer.duration();
+  emb_copy_d2h_time += d2h_timer.duration();
   printf("[ %d ] Copy embedding GPU to host completed in %lf seconds \n", my_rank, emb_copy_d2h_time);
 
   // Detailed corpus read time breakdown
@@ -1645,6 +1662,7 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
   cudaFree(d_sen);
   cudaFree(d_sent_len);
   cudaFree(d_negSample);
+  train_wait_sync_time += wait_sync_time;
 }
 
 vector<vertex_id_t> g_v_degree;
@@ -2350,15 +2368,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   checkCUDAerr(cudaMalloc(&d_results, EVALUATION_NEIGHBOUR_NUM * sizeof(float)));
   double cuda_time = cuda_timer.duration();
   
-  double total_init_time = total_init_timer.duration();
-  printf("==========init success================\n");
-  printf("[ %d ] === INITIALIZATION TIMING BREAKDOWN ===\n", my_rank);
-  printf("[ %d ] Vocab setup:     %.6f seconds\n", my_rank, vocab_time);
-  printf("[ %d ] Network init:    %.6f seconds\n", my_rank, net_time);
-  printf("[ %d ] CUDA setup:      %.6f seconds\n", my_rank, cuda_time);
-  printf("[ %d ] TOTAL INIT TIME: %.6f seconds\n", my_rank, total_init_time);
-  printf("[ %d ] ===========================================\n", my_rank);
-  
+  Timer batch_cuda_timer;
   // Batch processing GPU memory (larger allocation)
   const int MAX_BATCH_EVALUATIONS = batch_size * EVALUATION_NEIGHBOUR_NUM;  // batch_size * 30 evaluations
   float *d_A_batch, *d_B_batch, *d_results_batch;
@@ -2368,6 +2378,19 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   checkCUDAerr(cudaMalloc(&d_B_batch, MAX_BATCH_EVALUATIONS * layer1_size * sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_results_batch, MAX_BATCH_EVALUATIONS * sizeof(float)));
   printf("[ %d ] Batch GPU memory allocation successful\n", my_rank);
+  double batch_cuda_time = batch_cuda_timer.duration();
+  printf("[ %d ] Batch CUDA memory setup time: %.6f seconds\n", my_rank, batch_cuda_time);
+
+  double total_init_time = total_init_timer.duration();
+  train_model_init_time = total_init_time;
+  printf("==========init success================\n");
+  printf("[ %d ] === INITIALIZATION TIMING BREAKDOWN ===\n", my_rank);
+  printf("[ %d ] Vocab setup:         %.6f seconds\n", my_rank, vocab_time);
+  printf("[ %d ] Network init:        %.6f seconds\n", my_rank, net_time);
+  printf("[ %d ] single CUDA setup:   %.6f seconds\n", my_rank, cuda_time);
+  printf("[ %d ] Batch CUDA setup:    %.6f seconds\n", my_rank, batch_cuda_time);
+  printf("[ %d ] TOTAL INIT TIME:     %.6f seconds\n", my_rank, total_init_time);
+  printf("[ %d ] ===========================================\n", my_rank);
 
   thread* sync_thread = nullptr;
   if (num_procs > 1) {
@@ -2381,6 +2404,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   std::vector<double> round_wait_times;
   std::vector<double> round_training_times;
   std::vector<double> round_eval_times;
+  std::vector<double> round_total_times;
   
   while(!stop_train_flag){
     Timer round_timer;  // Timer for entire training round
@@ -2485,6 +2509,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
       round_wait_times.push_back(wait_time);
       round_training_times.push_back(actual_train_time);
       round_eval_times.push_back(eval_time);
+      round_total_times.push_back(total_round_time);
       printf("[ %d ] === TRAINING ROUND %d COMPLETED === Wait: %.3fs, Train: %.3fs, Eval: %.3fs, Total: %.3fs\n",
         my_rank, train_iter, wait_time, actual_train_time, eval_time, total_round_time);
       last_eva_num = eva_num;
@@ -2496,28 +2521,30 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   // Print detailed round-level training timing statistics
   if (!round_wait_times.empty()) {
     printf("\n================== [ %d ] TRAINING ROUND-LEVEL TIMING STATISTICS ==================\n", my_rank);
-    double total_wait_time = 0.0, total_training_time = 0.0, total_eval_time = 0.0;
+    double total_wait_time = 0.0, total_training_time = 0.0, total_eval_time = 0.0, total_time = 0.0;
     
     for (size_t i = 0; i < round_wait_times.size(); i++) {
       total_wait_time += round_wait_times[i];
       total_training_time += round_training_times[i];
       total_eval_time += round_eval_times[i];
+      total_time += round_total_times[i];
       printf("Round %2zu: Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs\n", 
              i+1, round_wait_times[i], round_training_times[i], round_eval_times[i],
-             round_wait_times[i] + round_training_times[i] + round_eval_times[i]);
+             round_total_times[i]);
     }
     
     printf("===================================================================================\n");
     printf("SUMMARY: Rounds=%zu, Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs\n",
            round_wait_times.size(), total_wait_time, total_training_time, total_eval_time,
-           total_wait_time + total_training_time + total_eval_time);
-    printf("AVERAGES: Wait=%.3fs, Train=%.3fs, Eval=%.3fs per round\n",
+           total_time);
+    printf("AVERAGES: Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs per round\n",
            total_wait_time/round_wait_times.size(), total_training_time/round_wait_times.size(),
-           total_eval_time/round_wait_times.size());
+           total_eval_time/round_wait_times.size(), total_time/round_wait_times.size());
     printf("===================================================================================\n\n");
     
     // Update global timing variables
-    train_spend_time = total_training_time;
+    train_wait_walk_time = total_wait_time;
+    pure_training_time = total_training_time;
     evaluate_spend_time = total_eval_time;
   }
   
@@ -2533,7 +2560,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     delete sync_thread;
   }
 
-  printf("[%d] Train: %f Sync: %f EVA: %f \n",my_rank,training_time,sync_spend_time,evaluate_spend_time);
+  printf("[%d] Train: %f Sync: %f EVA: %f \n",my_rank,pure_training_time,sync_spend_time,evaluate_spend_time);
   
   // Free original evaluation GPU memory
   cudaFree(d_A);
@@ -2723,7 +2750,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) min_count = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-classes", argc, argv)) > 0) classes = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-reuse-neg", argc, argv)) > 0) reuseNeg = atoi(argv[i + 1]);
-
+  Timer vocab_init_timer;
   vocab = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
   vocab_hash = (long long *)calloc(vocab_hash_size, sizeof(long long));
   expTable = (float *)malloc((EXP_TABLE_SIZE + 1) * sizeof(float));
@@ -2732,9 +2759,13 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
     expTable[i] = exp((i / (float)EXP_TABLE_SIZE * 2 - 1) * MAX_EXP); // Precompute the exp() table
     expTable[i] = expTable[i] / (expTable[i] + 1);                   // Precompute f(x) = x / (x + 1)
   }
+  double vocab_init_time = vocab_init_timer.duration();
+  printf("[ %d ] Vocab initialization (preparation only) completed in %.6f seconds\n", my_rank, vocab_init_time);
+  Timer copy_timer;
   checkCUDAerr(cudaMalloc((void **)&d_expTable, (EXP_TABLE_SIZE + 1) * sizeof(float)));
   checkCUDAerr(cudaMemcpy(d_expTable, expTable, (EXP_TABLE_SIZE + 1) * sizeof(float), cudaMemcpyHostToDevice));
-
+  double copy_time = copy_timer.duration();
+  printf("[ %d ] Copy expTable to GPU in %.6f seconds\n", my_rank, copy_time);
   TrainModel(corpus_q,csr,config);
 
   printf("[ %d ] [Sync Time Spend: %f s]\n",my_rank,sync_spend_time);

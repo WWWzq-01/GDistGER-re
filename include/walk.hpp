@@ -759,17 +759,17 @@ public:
                     // Calculate compression statistics before move
                     this->calculateCompressionStats();
                     
-                    // Perform compression test before moving data
-                    compress_t compress_corpus;
-                    CorpusCompressor compressor;
-                    compressor.compressCorpus(this->local_corpus, compress_corpus);
+                    // // Perform compression test before moving data
+                    // compress_t compress_corpus;
+                    // CorpusCompressor compressor;
+                    // compressor.compressCorpus(this->local_corpus, compress_corpus);
                     
-                    // Calculate and save actual compression size
-                    this->saved_compress_size = 0;
-                    for(size_t i = 0; i < compress_corpus.size(); i++){
-                        this->saved_compress_size += compress_corpus[i].coreMap.mem_size();
-                        this->saved_compress_size += compress_corpus[i].misc_data.size() * sizeof(vertex_id_t);
-                    }
+                    // // Calculate and save actual compression size
+                    // this->saved_compress_size = 0;
+                    // for(size_t i = 0; i < compress_corpus.size(); i++){
+                    //     this->saved_compress_size += compress_corpus[i].coreMap.mem_size();
+                    //     this->saved_compress_size += compress_corpus[i].misc_data.size() * sizeof(vertex_id_t);
+                    // }
                     
                     this->out_queue.push(std::move(this->local_corpus));  // Use move semantics to avoid copying
                     compress_time = compress_timer.duration();
