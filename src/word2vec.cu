@@ -59,8 +59,19 @@ std::condition_variable cv;
 bool hasResource = false;
 std::atomic<bool> pauseWalk{false};
 extern volatile bool stop_sampling_flag;
-const long long vocab_hash_size = 900000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
-                                  
+size_t vocab_hash_size = 900000000ULL;  // Default capacity, adjusted dynamically per dataset
+constexpr size_t kVocabHashCap = 900000000ULL;  // Hard cap to avoid excessive allocations
+
+static size_t CalculateVocabHashSize(size_t node_count) {
+  if (node_count == 0) {
+    return std::min<size_t>(kVocabHashCap, static_cast<size_t>(1024));
+  }
+  const double load_factor = 0.7;
+  size_t desired = static_cast<size_t>(std::ceil(node_count / load_factor));
+  if (desired > kVocabHashCap) desired = kVocabHashCap;
+  if (desired < 1024) desired = 1024;
+  return desired;
+}
 
 MPI_Comm MPI_EMB_COMM;
 MPI_Comm MPI_EVA_COMM;
@@ -740,7 +751,7 @@ void SortVocab() {
   unsigned long long hash;
   // Sort the vocabulary and keep </s> at the first position
   qsort(&vocab[0], vocab_size, sizeof(struct vocab_word), VocabCompare);
-  for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
+  for (size_t hash_idx = 0; hash_idx < vocab_hash_size; ++hash_idx) vocab_hash[hash_idx] = -1;
   size = vocab_size;
   train_words = 0;
   for (a = 0; a < size; a++) {
@@ -774,7 +785,7 @@ void ReduceVocab() {
     b++;
   } else free(vocab[a].word);
   vocab_size = b;
-  for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
+  for (size_t hash_idx = 0; hash_idx < vocab_hash_size; ++hash_idx) vocab_hash[hash_idx] = -1;
   for (a = 0; a < vocab_size; a++) {
     // Hash will be re-computed, as it is not actual
     hash = GetWordHash(vocab[a].word);
@@ -856,7 +867,7 @@ void LearnVocabFromTrainFile() {
   char word[MAX_STRING];
   FILE *fin;
   long long a, i;
-  for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
+  for (size_t hash_idx = 0; hash_idx < vocab_hash_size; ++hash_idx) vocab_hash[hash_idx] = -1;
   fin = fopen(train_file, "rb");
   if (fin == NULL) {
     printf("ERROR: training data file not found!\n");
@@ -877,7 +888,7 @@ void LearnVocabFromTrainFile() {
       a = AddWordToVocab(word);
       vocab[a].cn = 1;
     } else vocab[i].cn++;
-    if (vocab_size > vocab_hash_size * 0.7) ReduceVocab();
+  if (vocab_size > static_cast<long long>(static_cast<double>(vocab_hash_size) * 0.7)) ReduceVocab();
   }
   SortVocab();
   if (debug_mode > 0) {
@@ -902,11 +913,10 @@ void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
   Timer section_timer;
 
   vertex_id_t v_num = degrees.size();
-  long long a;
   char word[MAX_STRING];
 
   section_timer.restart();
-  for (a = 0; a < vocab_hash_size; a ++) vocab_hash[a] = -1;
+  for (size_t hash_idx = 0; hash_idx < vocab_hash_size; ++hash_idx) vocab_hash[hash_idx] = -1;
   double hash_init_time = section_timer.duration();
 
   vocab_size = 0;
@@ -914,8 +924,8 @@ void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
   for (vertex_id_t v = 0; v < v_num; v++)
   {
     std::sprintf(word,"%u",v);  // node ID 以字符串的形式存在 vocab 里面。
-    a = AddWordToVocab(word);
-    vocab[a].cn = degrees[v];
+    int idx = AddWordToVocab(word);
+    vocab[idx].cn = degrees[v];
   }
   double add_vocab_time = section_timer.duration();
 
@@ -954,7 +964,7 @@ void ReadVocab() {
     printf("Vocabulary file not found\n");
     exit(1);
   }
-  for (a = 0; a < vocab_hash_size; a++) vocab_hash[a] = -1;
+  for (size_t hash_idx = 0; hash_idx < vocab_hash_size; ++hash_idx) vocab_hash[hash_idx] = -1;
   vocab_size = 0;
   while (1) {
     ReadWord(word, fin);
@@ -2706,6 +2716,15 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   vertex_walker_stop_flag.assign(degrees.size(),0);
   g_v_degree.assign(degrees.begin(), degrees.end());
+
+  const size_t node_count = g_v_degree.size();
+  vocab_hash_size = CalculateVocabHashSize(node_count);
+  const size_t desired_vocab_capacity = node_count + 1000ULL;
+  if (static_cast<size_t>(vocab_max_size) < desired_vocab_capacity) {
+    vocab_max_size = static_cast<long long>(desired_vocab_capacity);
+  }
+  printf("[ %d ] Vocab hash size configured: %zu (node count: %zu)\n", my_rank, vocab_hash_size, node_count);
+
   printf("train_corpus_Cuda calling!!!!\n");
   int i;
   if (argc == 1) {
