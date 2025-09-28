@@ -20,6 +20,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <atomic>
 #include <unistd.h>
 #include "edge_container.hpp"
 #include "lr_scheduler.hpp"
@@ -56,6 +57,7 @@ vector<int> vertex_walker_stop_flag;
 std::mutex mtx;
 std::condition_variable cv;
 bool hasResource = false;
+std::atomic<bool> pauseWalk{false};
 extern volatile bool stop_sampling_flag;
 const long long vocab_hash_size = 900000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
                                   
@@ -896,32 +898,51 @@ void SaveVocab() {
 vector<vertex_id_t> id2offset;
 
 void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
+  Timer total_timer;
+  Timer section_timer;
+
   vertex_id_t v_num = degrees.size();
-  long long a, i = 0;
+  long long a;
   char word[MAX_STRING];
+
+  section_timer.restart();
   for (a = 0; a < vocab_hash_size; a ++) vocab_hash[a] = -1;
+  double hash_init_time = section_timer.duration();
+
   vocab_size = 0;
+  section_timer.restart();
   for (vertex_id_t v = 0; v < v_num; v++)
   {
-    //printf("\r[ %d ] add v: %u to vocab",my_rank,v);
     std::sprintf(word,"%u",v);  // node ID 以字符串的形式存在 vocab 里面。
     a = AddWordToVocab(word);
     vocab[a].cn = degrees[v];
   }
-  // 现在vocab 里面存了所有 {nodeId,degree} 的形式。
+  double add_vocab_time = section_timer.duration();
+
   printf("[ %d ] Add Word To Vocab OK\n",my_rank);
   printf("[ %d ] SortVocab Start\n",my_rank);
+
+  section_timer.restart();
   SortVocab();
+  double sort_time = section_timer.duration();
+
   if (debug_mode > 0) {
     printf("Vocab size: %lld\n", vocab_size);
     printf("Words in train file: %lld\n", train_words);
   }
+
+  section_timer.restart();
   id2offset.resize(vocab_size);
-  for(vertex_id_t vi = 0; vi<vocab_size; vi++){
+  for(vertex_id_t vi = 0; vi < vocab_size; vi++){
     char* endptr;
-    vertex_id_t nid = (vertex_id_t)strtoul(vocab[vi].word,&endptr,10);
+    vertex_id_t nid = (vertex_id_t)strtoul(vocab[vi].word, &endptr, 10);
     id2offset[nid] = vi;
-  } 
+  }
+  double id_map_time = section_timer.duration();
+
+  double total_time = total_timer.duration();
+  printf("[ %d ] Vocab timings (s): hash_init=%.3f, add_vocab=%.3f, sort=%.3f, id_map=%.3f, total=%.3f\n",
+         my_rank, hash_init_time, add_vocab_time, sort_time, id_map_time, total_time);
 }
 
 void ReadVocab() {
@@ -2418,6 +2439,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     corpus_t corpus_data = taskq.pop();  // Get corpus data directly instead of file path
     // 此时可以sample下一轮了
     hasResource = false; // 坑位被释放
+    pauseWalk.store(false, std::memory_order_relaxed); // 继续游走
     cv.notify_one();
     cout << "====== POP CORPUS DATA (size: " << corpus_data.size() << ") ===" << endl;
     train_iter++;
@@ -2434,6 +2456,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     printf("[ %d ] train corpus data finished, time: %.3fs\n",my_rank, actual_train_time);
     MPI_Barrier(MPI_EMB_COMM);
     pause_sync = true;
+    pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
     std::cout << std::endl;
     
     vertex_id_t eva_num = 0;
@@ -2494,6 +2517,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
       printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
       MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
       MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EVA_COMM);
+      // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
       // 收敛了，每次减少的比例不多
       float eva_num_ratio = (float)eva_num / last_eva_num;
       if( last_eva_num != 0 && eva_num_ratio> EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){

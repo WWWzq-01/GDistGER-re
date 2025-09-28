@@ -242,7 +242,7 @@ int main(int argc, char **argv)
                walk_execution_time, (walk_execution_time/total_time)*100);
         printf("   - Pure walk time:            %lf s  (%.2f%% of walk)\n", graph.walk_time, (graph.walk_time/walk_execution_time)*100);
         printf("        - Message passing time:      %lf s\n", graph.msg_time);
-        printf("   - Waiting time (hasResouce): %lf s  (%.2f%% of walk)\n", graph.waiting_time, (graph.waiting_time/walk_execution_time)*100);
+        printf("   - Waiting time (hasResource): %lf s  (%.2f%% of walk)\n", graph.waiting_time, (graph.waiting_time/walk_execution_time)*100);
         printf("   - Assemble time:             %lf s  (%.2f%% of walk)\n", graph.assemble_time, (graph.assemble_time/walk_execution_time)*100);
         printf("   - Dump time:                 %lf s  (%.2f%% of walk)\n", graph.dump_time, (graph.dump_time/walk_execution_time)*100);
         printf("   - Compress time:             %lf s  (%.2f%% of walk)\n", graph.compress_time, (graph.compress_time/walk_execution_time)*100);

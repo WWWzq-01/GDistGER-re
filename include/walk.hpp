@@ -17,11 +17,13 @@
 #include <mutex>
 #include "shared.h"
 #include <condition_variable>
+#include <atomic>
 
 extern vector<int> vertex_walker_stop_flag;
 extern std::mutex mtx;
 extern std::condition_variable cv;
 extern bool hasResource ;
+extern std::atomic<bool> pauseWalk;
 double walking_time = 0.0;
 using namespace std; 
 
@@ -757,7 +759,7 @@ public:
                     size_t corpus_size = this->local_corpus.size();  // Save size before move
                     
                     // Calculate compression statistics before move
-                    this->calculateCompressionStats();
+                    // this->calculateCompressionStats();
                     
                     // // Perform compression test before moving data
                     // compress_t compress_corpus;
@@ -965,6 +967,12 @@ public:
                 printf("step(%d), active(%u), time(%.3lf)\n", super_step++, active_walker_num, walk_data->timer.duration());
             }
             #endif
+            if(pauseWalk.load(std::memory_order_relaxed)) {
+                pauseWalk.store(false, std::memory_order_relaxed);
+                printf("[ %d ] PAUSE WALKING\n",get_mpi_rank());
+                active_walker_num = 0;
+                break;
+            }
             bool use_parallel = (active_walker_num >= OMP_PARALLEL_THRESHOLD);
             // use_parallel = false;
             auto msg_producer = [&] (void) {
@@ -978,16 +986,28 @@ public:
                     int worker_id = omp_get_thread_num();
                     StdRandNumGenerator* gen = get_thread_local_rand_gen();
                     vertex_id_t next_workload;
-                    while((next_workload =  __sync_fetch_and_add(&progress, work_step_length)) < data_amount)
+                    while(true)
                     {
+                        if (pauseWalk.load(std::memory_order_relaxed)) {
+                            // pauseWalk.store(false, std::memory_order_relaxed);
+                            break;
+                        }
+                        next_workload = __sync_fetch_and_add(&progress, work_step_length);
+                        if (next_workload >= data_amount) {
+                            break;
+                        }
                         walker_msg_t *begin = data_begin + next_workload;
                         walker_msg_t *end = data_begin + std::min(next_workload + work_step_length, data_amount);
                         for (walker_msg_t *p = begin; p != end; p++)
                         {
+                            if (pauseWalk.load(std::memory_order_relaxed)) {
+                                // pauseWalk.store(false, std::memory_order_relaxed);
+                                break;
+                            }
                             walker_t walker = p->data;
                             vertex_id_t current_v = p->dst_vertex_id;
                             Correlation cal_corr;
-                            
+
                             double fi = static_cast<double>(walker_to_path[walker.id][current_v]++);
                             assert(fi >= 0);
                             if(walker.N == 0)
