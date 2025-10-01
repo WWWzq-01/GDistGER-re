@@ -722,6 +722,7 @@ public:
             Timer test_timer;
             walk_step_timer.restart(); // Start timing the actual walk execution
             internal_walk_epoch(&walk_data, walker_config, transition_config);
+            pauseWalk.store(false, std::memory_order_relaxed);
             current_walk_time = walk_step_timer.duration();
             this->walk_time += current_walk_time;
 
