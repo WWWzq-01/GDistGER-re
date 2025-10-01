@@ -41,8 +41,8 @@ using std::endl;
 #define MAX_CODE_LENGTH 40
 
 #define EVALUATION_NEIGHBOUR_NUM 30
-#define NODE_TRAINING_CONVERGE_THRESHOLD 0.65
-#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.7
+#define NODE_TRAINING_CONVERGE_THRESHOLD 0.7
+#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.75
 
 #define MAX_SENTENCE 15000
 #define checkCUDAerr(err) {\
@@ -71,6 +71,43 @@ static size_t CalculateVocabHashSize(size_t node_count) {
   if (desired > kVocabHashCap) desired = kVocabHashCap;
   if (desired < 1024) desired = 1024;
   return desired;
+}
+
+namespace {
+struct AddWordToVocabProfile {
+  double total_time = 0.0;
+  double alloc_time = 0.0;
+  double copy_time = 0.0;
+  double realloc_time = 0.0;
+  double hash_time = 0.0;
+  double probe_time = 0.0;
+  long long call_count = 0;
+};
+
+inline AddWordToVocabProfile &ProfileStorage() {
+  static AddWordToVocabProfile profile;
+  return profile;
+}
+
+inline void ResetAddWordToVocabProfile() {
+  ProfileStorage() = AddWordToVocabProfile{};
+}
+
+inline void RecordAddWordToVocabSample(double total, double alloc, double copy, double realloc_t,
+                                        double hash, double probe) {
+  auto &profile = ProfileStorage();
+  profile.total_time += total;
+  profile.alloc_time += alloc;
+  profile.copy_time += copy;
+  profile.realloc_time += realloc_t;
+  profile.hash_time += hash;
+  profile.probe_time += probe;
+  profile.call_count += 1;
+}
+
+inline AddWordToVocabProfile GetAddWordToVocabProfile() {
+  return ProfileStorage();
+}
 }
 
 MPI_Comm MPI_EMB_COMM;
@@ -723,21 +760,43 @@ int ReadWordIndex(FILE *fin) {
 
 // Adds a word to the vocabulary
 int AddWordToVocab(char *word) {
+  Timer total_timer;
+  Timer step_timer;
   unsigned int hash, length = strlen(word) + 1;
   if (length > MAX_STRING) length = MAX_STRING;
+
+  step_timer.restart();
   vocab[vocab_size].word = (char *)calloc(length, sizeof(char));
+  double alloc_time = step_timer.duration();
+
+  step_timer.restart();
   strcpy(vocab[vocab_size].word, word);
+  double copy_time = step_timer.duration();
+
   vocab[vocab_size].cn = 0;
   vocab_size++;
-  // reallocate memory if needed
+
+  step_timer.restart();
   if (vocab_size + 2 >= vocab_max_size) {
     vocab_max_size += 1000;
     vocab = (struct vocab_word *)realloc(vocab, vocab_max_size * sizeof(struct vocab_word));
   }
+  double realloc_time = step_timer.duration();
+
+  step_timer.restart();
   hash = GetWordHash(word);
+  double hash_time = step_timer.duration();
+
+  step_timer.restart();
   while (vocab_hash[hash] != -1) hash = (hash + 1) % vocab_hash_size;
-  vocab_hash[hash] = vocab_size - 1;
-  return vocab_size - 1;
+  double probe_time = step_timer.duration();
+
+  int index = vocab_size - 1;
+  vocab_hash[hash] = index;
+
+  double total_time = total_timer.duration();
+  RecordAddWordToVocabSample(total_time, alloc_time, copy_time, realloc_time, hash_time, probe_time);
+  return index;
 }
 
 // Used later for sorting by word counts
@@ -747,14 +806,14 @@ int VocabCompare(const void *a, const void *b) {
 
 // Sorts the vocabulary by frequency using word counts
 void SortVocab() {
-  unsigned long long a, size;
+  size_t size;
   unsigned long long hash;
   // Sort the vocabulary and keep </s> at the first position
   qsort(&vocab[0], vocab_size, sizeof(struct vocab_word), VocabCompare);
   for (size_t hash_idx = 0; hash_idx < vocab_hash_size; ++hash_idx) vocab_hash[hash_idx] = -1;
   size = vocab_size;
   train_words = 0;
-  for (a = 0; a < size; a++) {
+  for (size_t a = 0; a < size; a++) {
     // Words occuring less than min_count times will be discarded from the vocab
     if ((vocab[a].cn < min_count) && (a != 0)) {
       vocab_size--;
@@ -769,7 +828,7 @@ void SortVocab() {
   }
   vocab = (struct vocab_word *)realloc(vocab, (vocab_size + 1) * sizeof(struct vocab_word));
   // Allocate memory for the binary tree construction
-  for (a = 0; a < vocab_size; a++) {
+  for (size_t a = 0; a < static_cast<size_t>(vocab_size); a++) {
     vocab[a].code = (char *)calloc(MAX_CODE_LENGTH, sizeof(char));
     vocab[a].point = (int *)calloc(MAX_CODE_LENGTH, sizeof(int));
   }
@@ -915,19 +974,32 @@ void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
   vertex_id_t v_num = degrees.size();
   char word[MAX_STRING];
 
+  ResetAddWordToVocabProfile();
+
   section_timer.restart();
   for (size_t hash_idx = 0; hash_idx < vocab_hash_size; ++hash_idx) vocab_hash[hash_idx] = -1;
   double hash_init_time = section_timer.duration();
 
   vocab_size = 0;
   section_timer.restart();
+  Timer sprintf_timer;
+  double sprintf_time = 0;
   for (vertex_id_t v = 0; v < v_num; v++)
   {
+    sprintf_timer.restart();
     std::sprintf(word,"%u",v);  // node ID 以字符串的形式存在 vocab 里面。
+    sprintf_time += sprintf_timer.duration();
     int idx = AddWordToVocab(word);
     vocab[idx].cn = degrees[v];
   }
   double add_vocab_time = section_timer.duration();
+  auto profile = GetAddWordToVocabProfile();
+  double add_word_avg = profile.call_count ? profile.total_time / static_cast<double>(profile.call_count) : 0.0;
+  printf("[ %d ] Sprintf time: %.3f,AddWordToVocab loop: %.3f\n", my_rank, sprintf_time, add_vocab_time - sprintf_time);
+  printf("[ %d ] AddWordToVocab stats: calls=%lld, total=%.3f s, avg=%.6e s\n",
+         my_rank, profile.call_count, profile.total_time, add_word_avg);
+  printf("[ %d ]   alloc=%.3f s, copy=%.3f s, realloc=%.3f s, hash=%.3f s, probe=%.3f s\n",
+         my_rank, profile.alloc_time, profile.copy_time, profile.realloc_time, profile.hash_time, profile.probe_time);
 
   printf("[ %d ] Add Word To Vocab OK\n",my_rank);
   printf("[ %d ] SortVocab Start\n",my_rank);
@@ -956,7 +1028,8 @@ void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
 }
 
 void ReadVocab() {
-  long long a, i = 0;
+  int a;
+  long long i = 0;
   char c;
   char word[MAX_STRING];
   FILE *fin = fopen(read_vocab_file, "rb");
@@ -1097,7 +1170,13 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
                break;
     }
   } else {
+    printf("no reuseNeg\n");
     switch(reduSize) {
+      case 32: skip_gram_kernel<16><<<gDim, bDim>>>
+                (window, layer1_size, negative, hs, table_size, vocab_size, alpha,
+                d_expTable, d_table, d_vocab_codelen, d_vocab_point, d_vocab_code,
+                d_sen, d_sent_len, d_syn1, d_syn0);
+                break;
       case 64: skip_gram_kernel<32><<<gDim, bDim>>>
                 (window, layer1_size, negative, hs, table_size, vocab_size, alpha,
                 d_expTable, d_table, d_vocab_codelen, d_vocab_point, d_vocab_code,
@@ -2379,6 +2458,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   Timer cuda_timer;
   if (hs > 0) InitVocabStructCUDA();
   if (negative > 0) InitUnigramTable();
+  double cuda_time = cuda_timer.duration();
 
   start = clock();
   srand(time(NULL));
@@ -2391,13 +2471,6 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   int nu = 1;
 
   vertex_id_t part_vertex_num = ((vocab_size % num_procs) > 0) ? (vocab_size / num_procs + 1) : (vocab_size / num_procs); 
-  
-  // Original GPU memory for single-node evaluation
-  float *d_A, *d_B, *d_results;
-  checkCUDAerr(cudaMalloc(&d_A, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
-  checkCUDAerr(cudaMalloc(&d_B, EVALUATION_NEIGHBOUR_NUM * layer1_size *sizeof(float)));
-  checkCUDAerr(cudaMalloc(&d_results, EVALUATION_NEIGHBOUR_NUM * sizeof(float)));
-  double cuda_time = cuda_timer.duration();
   
   Timer batch_cuda_timer;
   // Batch processing GPU memory (larger allocation)
@@ -2418,7 +2491,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   printf("[ %d ] === INITIALIZATION TIMING BREAKDOWN ===\n", my_rank);
   printf("[ %d ] Vocab setup:         %.6f seconds\n", my_rank, vocab_time);
   printf("[ %d ] Network init:        %.6f seconds\n", my_rank, net_time);
-  printf("[ %d ] single CUDA setup:   %.6f seconds\n", my_rank, cuda_time);
+  printf("[ %d ] Vocab CUDA setup:    %.6f seconds\n", my_rank, cuda_time);
   printf("[ %d ] Batch CUDA setup:    %.6f seconds\n", my_rank, batch_cuda_time);
   printf("[ %d ] TOTAL INIT TIME:     %.6f seconds\n", my_rank, total_init_time);
   printf("[ %d ] ===========================================\n", my_rank);
@@ -2466,7 +2539,18 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     printf("[ %d ] train corpus data finished, time: %.3fs\n",my_rank, actual_train_time);
     MPI_Barrier(MPI_EMB_COMM);
     pause_sync = true;
-    pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
+    if(train_iter >= init_round) {
+      pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
+    }
+    // if (num_procs == 1) {
+    //   if(train_iter >= init_round) {
+    //     pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
+    //   }
+    //   // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
+    // } else {
+    //   // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
+    // }
+    // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
     std::cout << std::endl;
     
     vertex_id_t eva_num = 0;
@@ -2527,6 +2611,11 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
       printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
       MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
       MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EVA_COMM);
+      // if (num_procs == 1) {
+      //   pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
+      // } else {
+      //   // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
+      // }
       // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
       // 收敛了，每次减少的比例不多
       float eva_num_ratio = (float)eva_num / last_eva_num;
@@ -2596,10 +2685,10 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
 
   printf("[%d] Train: %f Sync: %f EVA: %f \n",my_rank,pure_training_time,sync_spend_time,evaluate_spend_time);
   
-  // Free original evaluation GPU memory
-  cudaFree(d_A);
-  cudaFree(d_B);
-  cudaFree(d_results);
+  // // Free original evaluation GPU memory
+  // cudaFree(d_A);
+  // cudaFree(d_B);
+  // cudaFree(d_results);
   
   // Free batch processing GPU memory
   printf("[ %d ] Freeing batch GPU memory\n", my_rank);

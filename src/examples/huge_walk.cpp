@@ -190,30 +190,30 @@ int main(int argc, char **argv)
     }
 
 
-    // =============== Information Feedback Collection ===============
-    Timer feedback_timer;
-    printf("[ %d ] Collecting information feedback data...\n", my_rank);
-    MPI_Allreduce(MPI_IN_PLACE,graph.vertex_cn.data(), graph.get_vertex_num(), get_mpi_data_type<int>(), MPI_SUM, MPI_COMM_WORLD);
-    double feedback_time = feedback_timer.duration();
-    printf("[ %d ] Information feedback collection completed in %lf seconds\n", my_rank, feedback_time);
+    // // =============== Information Feedback Collection ===============
+    // Timer feedback_timer;
+    // printf("[ %d ] Collecting information feedback data...\n", my_rank);
+    // MPI_Allreduce(MPI_IN_PLACE,graph.vertex_cn.data(), graph.get_vertex_num(), get_mpi_data_type<int>(), MPI_SUM, MPI_COMM_WORLD);
+    // double feedback_time = feedback_timer.duration();
+    // printf("[ %d ] Information feedback collection completed in %lf seconds\n", my_rank, feedback_time);
 
-    // =============== Corpus Compression Statistics ===============
-    printf("[ %d ] Displaying compression statistics (computed during walk)...\n", my_rank);
+    // // =============== Corpus Compression Statistics ===============
+    // printf("[ %d ] Displaying compression statistics (computed during walk)...\n", my_rank);
     
-    // Use saved compression statistics (calculated before move during walk)
-    size_t origin_size = graph.saved_origin_size;
-    size_t compress_size = graph.saved_compress_size;
-    corpus_compression_time = 0.0;  // Compression was done during walk, so no additional time here
+    // // Use saved compression statistics (calculated before move during walk)
+    // size_t origin_size = graph.saved_origin_size;
+    // size_t compress_size = graph.saved_compress_size;
+    // corpus_compression_time = 0.0;  // Compression was done during walk, so no additional time here
     
-    cout << "Original size: " << origin_size * 4 << " Byte." << endl;
-    cout <<"Top compress size: " << compress_size << " Byte." << endl;
-    cout <<"Top Ratio: " << (origin_size > 0 ? (float)compress_size/(origin_size * 4) : 0.0f) << endl;
+    // cout << "Original size: " << origin_size * 4 << " Byte." << endl;
+    // cout <<"Top compress size: " << compress_size << " Byte." << endl;
+    // cout <<"Top Ratio: " << (origin_size > 0 ? (float)compress_size/(origin_size * 4) : 0.0f) << endl;
 
-    // Use saved theoretical compression size
-    size_t theory_compress_size = graph.saved_theory_compress_size;
-    cout << "Original size: " << origin_size * 4 << " Byte." << endl;
-    cout <<"Theory compress size: " << theory_compress_size * 4 << " Byte." << endl;
-    cout <<"Ratio: " << (origin_size > 0 ? (float)theory_compress_size/origin_size : 0.0f) << endl;
+    // // Use saved theoretical compression size
+    // size_t theory_compress_size = graph.saved_theory_compress_size;
+    // cout << "Original size: " << origin_size * 4 << " Byte." << endl;
+    // cout <<"Theory compress size: " << theory_compress_size * 4 << " Byte." << endl;
+    // cout <<"Ratio: " << (origin_size > 0 ? (float)theory_compress_size/origin_size : 0.0f) << endl;
 
     // =============== Wait for Training Completion ===============
     Timer training_wait_timer;
