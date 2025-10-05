@@ -41,8 +41,8 @@ using std::endl;
 #define MAX_CODE_LENGTH 40
 
 #define EVALUATION_NEIGHBOUR_NUM 30
-#define NODE_TRAINING_CONVERGE_THRESHOLD 0.7
-#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.75
+#define NODE_TRAINING_CONVERGE_THRESHOLD 0.65
+#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.7
 
 #define MAX_SENTENCE 15000
 #define checkCUDAerr(err) {\
@@ -674,7 +674,11 @@ void InitVocabStructCUDA()
   checkCUDAerr(cudaMalloc((void **)&d_vocab_codelen, (vocab_size + 1) * sizeof(int)));
   checkCUDAerr(cudaMalloc((void **)&d_vocab_point, vocab_codelen[vocab_size] * sizeof(int)));
   checkCUDAerr(cudaMalloc((void **)&d_vocab_code, vocab_codelen[vocab_size] * sizeof(char)));
-
+  printf("[InitVocabStructCUDA] CUDA malloc vocab_codelen((%zu MB)), vocab_point((%zu MB)), vocab_code((%zu MB)) ,total (%zu MB)!\n",
+      (vocab_size + 1) * sizeof(int) / (1024 * 1024),
+      vocab_codelen[vocab_size] * sizeof(int) / (1024 * 1024),
+      vocab_codelen[vocab_size] * sizeof(char) / (1024 * 1024),
+      ((vocab_size + 1) * sizeof(int) + vocab_codelen[vocab_size] * sizeof(int) + vocab_codelen[vocab_size] * sizeof(char)) / (1024 * 1024));
   for (int i=0; i<vocab_size; i++) {
     for (int j=0; j<vocab[i].codelen; j++) {
       vocab_code[vocab_codelen[i] + j] = vocab[i].code[j];
@@ -706,6 +710,7 @@ void InitUnigramTable() {
   }
   // FOR CUDA
   checkCUDAerr(cudaMalloc((void **)&d_table, table_size*sizeof(int)));
+  printf("[ %d ] [InitUnigramTable] CUDA malloc d_table (%zu MB) done!\n", my_rank, table_size * sizeof(int) / (1024 * 1024));
   checkCUDAerr(cudaMemcpy(d_table, table, table_size*sizeof(int), cudaMemcpyHostToDevice));
 }
 
@@ -1070,6 +1075,7 @@ void InitNet() {
   if (last_emb == NULL) {printf("Memory allocation failed\n"); exit(1);}
   
   a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(float));
+  int hs_cuda = 0,neg_cuda=0;
   if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
   if (hs) {
     a = posix_memalign((void **)&syn1, 128, (long long)vocab_size * layer1_size * sizeof(float));
@@ -1077,6 +1083,7 @@ void InitNet() {
     for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++)
       syn1[a * layer1_size + b] = 0;
     checkCUDAerr(cudaMalloc((void **)&d_syn1, (long long)vocab_size * layer1_size * sizeof(float)));
+    hs_cuda = vocab_size * layer1_size * sizeof(float) / (1024 * 1024);
     checkCUDAerr(cudaMemcpy(d_syn1, syn1, (long long)vocab_size * layer1_size * sizeof(float), cudaMemcpyHostToDevice));
   }
   if (negative>0) {
@@ -1085,6 +1092,7 @@ void InitNet() {
     for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++)
       syn1neg[a * layer1_size + b] = 0;
     checkCUDAerr(cudaMalloc((void **)&d_syn1, (long long)vocab_size * layer1_size * sizeof(float)));
+    neg_cuda = vocab_size * layer1_size * sizeof(float) / (1024 * 1024);
     checkCUDAerr(cudaMemcpy(d_syn1, syn1neg, (long long)vocab_size * layer1_size * sizeof(float), cudaMemcpyHostToDevice));
   }
   for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++) {
@@ -1092,6 +1100,11 @@ void InitNet() {
     syn0[a * layer1_size + b] = (((next_random & 0xFFFF) / (float)65536) - 0.5) / layer1_size;
   }
   checkCUDAerr(cudaMalloc((void **)&d_syn0, (long long)vocab_size * layer1_size * sizeof(float)));
+  int syn0_cuda = vocab_size * layer1_size * sizeof(float) / (1024 * 1024);
+  printf("[ %d ] [InitNet] CUDA malloc d_syn0 (%zu MB), hs=%zu MB, neg=%zu MB, total=%zu MB\n",
+      my_rank,
+      syn0_cuda,
+      hs_cuda, neg_cuda, hs_cuda + neg_cuda + syn0_cuda);
   checkCUDAerr(cudaMemcpy(d_syn0, syn0, (long long)vocab_size * layer1_size * sizeof(float), cudaMemcpyHostToDevice));
 
   CreateBinaryTree();
@@ -1356,11 +1369,15 @@ void TrainModelThread(string data_path)
 
   checkCUDAerr(cudaMalloc((void **)&d_sen, MAX_SENTENCE * 100 * sizeof(int)));
   checkCUDAerr(cudaMalloc((void **)&d_sent_len, (MAX_SENTENCE + 1) * sizeof(int)));
-
+  printf("[ %d ] CUDA malloc d_sen (%zu MB), d_sent_len (%zu MB), total (%zu MB)\n", my_rank,
+      MAX_SENTENCE * 100 * sizeof(int) / (1024 * 1024),
+      (MAX_SENTENCE + 1) * sizeof(int) / (1024 * 1024),
+      (MAX_SENTENCE * 100 + (MAX_SENTENCE + 1)) * sizeof(int) / (1024 * 1024));
   int *negSample = (int *)malloc(MAX_SENTENCE * negative * sizeof(int));
   int *d_negSample;
   checkCUDAerr(cudaMalloc(&d_negSample, MAX_SENTENCE * negative * sizeof(int)));
-
+  printf("[ %d ] CUDA malloc d_negSample (%zu MB)\n", my_rank,
+      MAX_SENTENCE * negative * sizeof(int) / (1024 * 1024));
   Timer subsampling_precompute_timer;
   std::vector<uint16_t> subsample_thresholds = BuildSubsamplingThresholds(sample, train_words);
   double subsampling_precompute_time = subsampling_precompute_timer.duration();
@@ -1533,11 +1550,15 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
 
   checkCUDAerr(cudaMalloc((void **)&d_sen, MAX_SENTENCE * 100 * sizeof(int)));
   checkCUDAerr(cudaMalloc((void **)&d_sent_len, (MAX_SENTENCE + 1) * sizeof(int)));
-
+  printf("[ %d ] CUDA malloc d_sen (%zu MB), d_sent_len (%zu MB), total (%zu MB)\n", my_rank,
+      MAX_SENTENCE * 100 * sizeof(int) / (1024 * 1024),
+      (MAX_SENTENCE + 1) * sizeof(int) / (1024 * 1024),
+      (MAX_SENTENCE * 100 + (MAX_SENTENCE + 1)) * sizeof(int) / (1024 * 1024));
   int *negSample = (int *)malloc(MAX_SENTENCE * negative * sizeof(int));
   int *d_negSample;
   checkCUDAerr(cudaMalloc(&d_negSample, MAX_SENTENCE * negative * sizeof(int)));
-
+  printf("[ %d ] CUDA malloc d_negSample (%zu MB)\n", my_rank,
+      MAX_SENTENCE * negative * sizeof(int) / (1024 * 1024));
   Timer subsampling_precompute_timer;
   std::vector<uint16_t> subsample_thresholds = BuildSubsamplingThresholds(sample, train_words);
   double subsampling_precompute_time = subsampling_precompute_timer.duration();
@@ -2324,7 +2345,14 @@ std::vector<float> batch_node_neighbor_direct_index(
         checkCUDAerr(cudaMalloc((void**)&d_neighbor_ids, total_evaluations * sizeof(vertex_id_t)));
         checkCUDAerr(cudaMalloc((void**)&d_id2offset_gpu, vocab_size * sizeof(vertex_id_t)));
         checkCUDAerr(cudaMalloc((void**)&d_results, total_evaluations * sizeof(float)));
-        
+        printf("[ %d ] GPU Direct: Allocated GPU memory for %d evaluations\n", my_rank, total_evaluations);
+        printf("[ %d ] CUDA malloc sizes - node_ids: %zu MB, neighbor_ids: %zu MB, id2offset: %zu MB, results: %zu MB, total = %zu MB\n", 
+               my_rank, 
+               total_evaluations * sizeof(vertex_id_t)/(1024*1024), 
+               total_evaluations * sizeof(vertex_id_t)/(1024*1024), 
+               vocab_size * sizeof(vertex_id_t)/(1024*1024), 
+               total_evaluations * sizeof(float)/(1024*1024),
+               total_evaluations * sizeof(vertex_id_t) * 2/(1024*1024) + vocab_size * sizeof(vertex_id_t)/(1024*1024) + total_evaluations * sizeof(float)/(1024*1024));
         // Step 3: Copy data to GPU
         checkCUDAerr(cudaMemcpy(d_node_ids, node_ids.data(), 
                                total_evaluations * sizeof(vertex_id_t), cudaMemcpyHostToDevice));
@@ -2481,6 +2509,12 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   checkCUDAerr(cudaMalloc(&d_A_batch, MAX_BATCH_EVALUATIONS * layer1_size * sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_B_batch, MAX_BATCH_EVALUATIONS * layer1_size * sizeof(float)));
   checkCUDAerr(cudaMalloc(&d_results_batch, MAX_BATCH_EVALUATIONS * sizeof(float)));
+  printf("[ %d ] [Batch GPU memory allocation] CUDA malloc: A(%zu MB), B(%zu MB), Results(%zu MB), total(%zu MB)\n", 
+         my_rank, 
+         (MAX_BATCH_EVALUATIONS * layer1_size * sizeof(float)) / (1024 * 1024),
+         (MAX_BATCH_EVALUATIONS * layer1_size * sizeof(float)) / (1024 * 1024),
+         (MAX_BATCH_EVALUATIONS * sizeof(float)) / (1024 * 1024)
+         , (2 * MAX_BATCH_EVALUATIONS * layer1_size * sizeof(float) + MAX_BATCH_EVALUATIONS * sizeof(float)) / (1024 * 1024));
   printf("[ %d ] Batch GPU memory allocation successful\n", my_rank);
   double batch_cuda_time = batch_cuda_timer.duration();
   printf("[ %d ] Batch CUDA memory setup time: %.6f seconds\n", my_rank, batch_cuda_time);
@@ -2651,17 +2685,17 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
       total_training_time += round_training_times[i];
       total_eval_time += round_eval_times[i];
       total_time += round_total_times[i];
-      printf("Round %2zu: Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs\n", 
-             i+1, round_wait_times[i], round_training_times[i], round_eval_times[i],
+      printf("[ %d ] Round %2zu: Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs\n", 
+             my_rank, i+1, round_wait_times[i], round_training_times[i], round_eval_times[i],
              round_total_times[i]);
     }
     
     printf("===================================================================================\n");
-    printf("SUMMARY: Rounds=%zu, Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs\n",
-           round_wait_times.size(), total_wait_time, total_training_time, total_eval_time,
+    printf("[ %d ] SUMMARY: Rounds=%zu, Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs\n",
+           my_rank, round_wait_times.size(), total_wait_time, total_training_time, total_eval_time,
            total_time);
-    printf("AVERAGES: Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs per round\n",
-           total_wait_time/round_wait_times.size(), total_training_time/round_wait_times.size(),
+    printf("[ %d ] AVERAGES: Wait=%.3fs, Train=%.3fs, Eval=%.3fs, Total=%.3fs per round\n",
+           my_rank, total_wait_time/round_wait_times.size(), total_training_time/round_wait_times.size(),
            total_eval_time/round_wait_times.size(), total_time/round_wait_times.size());
     printf("===================================================================================\n\n");
     
@@ -2895,6 +2929,8 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   printf("[ %d ] Vocab initialization (preparation only) completed in %.6f seconds\n", my_rank, vocab_init_time);
   Timer copy_timer;
   checkCUDAerr(cudaMalloc((void **)&d_expTable, (EXP_TABLE_SIZE + 1) * sizeof(float)));
+  printf("[ %d ] CUDA malloc expTable on GPU\n", my_rank);
+  printf("[ %d ] CUDA malloc d_expTable (%zu MB) done!\n", my_rank, (EXP_TABLE_SIZE + 1) * sizeof(float) / (1024 * 1024));
   checkCUDAerr(cudaMemcpy(d_expTable, expTable, (EXP_TABLE_SIZE + 1) * sizeof(float), cudaMemcpyHostToDevice));
   double copy_time = copy_timer.duration();
   printf("[ %d ] Copy expTable to GPU in %.6f seconds\n", my_rank, copy_time);

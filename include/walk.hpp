@@ -901,7 +901,8 @@ public:
                 total_Compress_time += round_compress_timtes[i];
                 total_time += total_round_times[i];
                 other_time = total_round_times[i] - (round_walk_times[i] + round_dump_times[i] + round_wait_times[i]+ round_KL_times[i]+round_compress_timtes[i]);
-                printf("Round %2zu: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Other=%.3fs, Total=%.3fs\n",
+                printf("[ %d ] Round %2zu: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Other=%.3fs, Total=%.3fs\n",
+                          get_mpi_rank(),
                        i+1, round_walk_times[i], round_dump_times[i], round_wait_times[i],
                        round_KL_times[i],round_compress_timtes[i],other_time,
                        total_round_times[i]);
@@ -909,10 +910,10 @@ public:
             
             printf("========================================================================\n");
             other_time = total_time - (total_walk_time + total_dump_time + total_wait_time + total_KL_time);
-            printf("SUMMARY: Rounds=%zu, Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Other=%.3fs, Total=%.3fs\n",
-                   round_walk_times.size(), total_walk_time, total_dump_time, total_wait_time,total_KL_time,total_Compress_time,other_time,
+            printf("[ %d ] SUMMARY: Rounds=%zu, Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Other=%.3fs, Total=%.3fs\n",
+                   get_mpi_rank(), round_walk_times.size(), total_walk_time, total_dump_time, total_wait_time,total_KL_time,total_Compress_time,other_time,
                    total_time);
-            printf("AVERAGES: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs ,KL=%.3fs , Compress=%.3fs per round,  Other=%.3fs\n",
+            printf("[ %d ] AVERAGES: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs ,KL=%.3fs , Compress=%.3fs per round,  Other=%.3fs\n",
                    total_walk_time/round_walk_times.size(), total_dump_time/round_walk_times.size(),
                    total_wait_time/round_walk_times.size(), total_KL_time/round_walk_times.size(), total_Compress_time/round_walk_times.size(),other_time/round_walk_times.size());
             this->waiting_time = total_wait_time;
