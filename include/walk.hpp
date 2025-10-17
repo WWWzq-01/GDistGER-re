@@ -467,11 +467,16 @@ public:
 
     double assemble_time = 0.0;
     double compress_time = 0.0;
+    double decompress_time = 0.0;
     double dump_time = 0.0;
     double walk_time = 0.0;
     double waiting_time = 0.0;
 
     double msg_time = 0.0;
+    double walk_compute_time = 0.0;
+    double walk_comm_time = 0.0;
+    double last_walk_compute_time = 0.0;
+    double last_walk_comm_time = 0.0;
     partition_id_t get_local_partition_id()
     {
         return this->local_partition_id;
@@ -664,6 +669,11 @@ public:
         walk_data.local_walkers = this->template alloc_array<Message<Walker<walker_data_t> > >(walker_array_size);
         walk_data.local_walkers_bak = this->template alloc_array<Message<Walker<walker_data_t> > >(walker_array_size);
 
+        this->walk_compute_time = 0.0;
+        this->walk_comm_time = 0.0;
+        this->last_walk_compute_time = 0.0;
+        this->last_walk_comm_time = 0.0;
+
         size_t max_msg_size = 0;
         if (order == 1)
         {
@@ -682,6 +692,7 @@ public:
         std::vector<double> round_wait_times;
         std::vector<double> round_KL_times;
         std::vector<double> round_compress_timtes;
+        std::vector<double> round_decompress_times;
         std::vector<double> total_round_times;
         
         while (remained_walker != 0)
@@ -757,27 +768,35 @@ public:
                     hasResource = true;
                     
                     Timer compress_timer;
+                    double decompress_elapsed = 0.0;
                     size_t corpus_size = this->local_corpus.size();  // Save size before move
                     
                     // Calculate compression statistics before move
-                    // this->calculateCompressionStats();
+                    this->calculateCompressionStats();
                     
-                    // // Perform compression test before moving data
-                    // compress_t compress_corpus;
-                    // CorpusCompressor compressor;
-                    // compressor.compressCorpus(this->local_corpus, compress_corpus);
+                    // Perform compression test before moving data
+                    compress_t compress_corpus;
+                    CorpusCompressor compressor;
+                    compressor.compressCorpus(this->local_corpus, compress_corpus);
                     
-                    // // Calculate and save actual compression size
-                    // this->saved_compress_size = 0;
-                    // for(size_t i = 0; i < compress_corpus.size(); i++){
-                    //     this->saved_compress_size += compress_corpus[i].coreMap.mem_size();
-                    //     this->saved_compress_size += compress_corpus[i].misc_data.size() * sizeof(vertex_id_t);
-                    // }
+                    // Calculate and save actual compression size
+                    this->saved_compress_size = 0;
+                    for(size_t i = 0; i < compress_corpus.size(); i++){
+                        this->saved_compress_size += compress_corpus[i].coreMap.mem_size();
+                        this->saved_compress_size += compress_corpus[i].misc_data.size() * sizeof(vertex_id_t);
+                    }
                     
                     this->out_queue.push(std::move(this->local_corpus));  // Use move semantics to avoid copying
                     compress_time = compress_timer.duration();
                     this->compress_time += compress_time;
-                    printf("this->compress_time: %.3fs, compress_time: %.3f", this->compress_time,compress_time);
+                    printf("this->compress_time: %.3fs, compress_time: %.3f\n", this->compress_time, compress_time);
+
+                    Timer decompress_timer;
+                    corpus_t decompressed_dummy;
+                    compressor.uncompressCorpus(decompressed_dummy, compress_corpus);
+                    decompress_elapsed = decompress_timer.duration();
+                    this->decompress_time += decompress_elapsed;
+                    printf("this->decompress_time: %.3fs, decompress_time: %.3f\n", this->decompress_time, decompress_elapsed);
 
                     cv.notify_one();
                     test_time = test_timer.duration();
@@ -836,9 +855,10 @@ public:
                         round_wait_times.push_back(wait_time);
                         round_KL_times.push_back(KL_time);
                         round_compress_timtes.push_back(compress_time);
+                        round_decompress_times.push_back(decompress_elapsed);
                         total_round_times.push_back(total_round_time);
-                        printf("[ %d ] === ROUND %d COMPLETED === Total: %.3fs, Walk: %.3fs, Corpus: %.3fs, Wait: %.3fs, KL: %.3fs, Compress: %.3fs\n", 
-                               get_mpi_rank(), iter, total_round_time, current_walk_time, corpus_dump_time, wait_time, KL_time,compress_time);
+                        printf("[ %d ] === ROUND %d COMPLETED === Total: %.3fs, Walk: %.3fs, Corpus: %.3fs, Wait: %.3fs, KL: %.3fs, Compress: %.3fs, Decompress: %.3fs\n", 
+                               get_mpi_rank(), iter, total_round_time, current_walk_time, corpus_dump_time, wait_time, KL_time, compress_time, decompress_elapsed);
                     }
                     
                     // iter = iter == 0 ? init_round + 1 : iter + 1;
@@ -890,7 +910,7 @@ public:
         if (!round_walk_times.empty()) {
             printf("\n================== [ %d ] ROUND-LEVEL TIMING STATISTICS ==================\n", get_mpi_rank());
             double total_walk_time = 0.0, total_dump_time = 0.0, total_wait_time = 0.0, other_time = 0.0, total_time = 0.0;
-            double total_KL_time = 0.0,total_Compress_time=0.0;
+            double total_KL_time = 0.0, total_Compress_time = 0.0, total_Decompress_time = 0.0;
 
 
             for (size_t i = 0; i < round_walk_times.size(); i++) {
@@ -899,23 +919,24 @@ public:
                 total_wait_time += round_wait_times[i];
                 total_KL_time += round_KL_times[i];
                 total_Compress_time += round_compress_timtes[i];
+                total_Decompress_time += round_decompress_times[i];
                 total_time += total_round_times[i];
-                other_time = total_round_times[i] - (round_walk_times[i] + round_dump_times[i] + round_wait_times[i]+ round_KL_times[i]+round_compress_timtes[i]);
-                printf("[ %d ] Round %2zu: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Other=%.3fs, Total=%.3fs\n",
+                other_time = total_round_times[i] - (round_walk_times[i] + round_dump_times[i] + round_wait_times[i]+ round_KL_times[i]+round_compress_timtes[i] + round_decompress_times[i]);
+                printf("[ %d ] Round %2zu: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Decompress=%.3fs, Other=%.3fs, Total=%.3fs\n",
                           get_mpi_rank(),
                        i+1, round_walk_times[i], round_dump_times[i], round_wait_times[i],
-                       round_KL_times[i],round_compress_timtes[i],other_time,
+                       round_KL_times[i], round_compress_timtes[i], round_decompress_times[i], other_time,
                        total_round_times[i]);
             }
             
             printf("========================================================================\n");
-            other_time = total_time - (total_walk_time + total_dump_time + total_wait_time + total_KL_time);
-            printf("[ %d ] SUMMARY: Rounds=%zu, Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Other=%.3fs, Total=%.3fs\n",
-                   get_mpi_rank(), round_walk_times.size(), total_walk_time, total_dump_time, total_wait_time,total_KL_time,total_Compress_time,other_time,
+            other_time = total_time - (total_walk_time + total_dump_time + total_wait_time + total_KL_time + total_Compress_time + total_Decompress_time);
+            printf("[ %d ] SUMMARY: Rounds=%zu, Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Decompress=%.3fs, Other=%.3fs, Total=%.3fs\n",
+                   get_mpi_rank(), round_walk_times.size(), total_walk_time, total_dump_time, total_wait_time, total_KL_time, total_Compress_time, total_Decompress_time, other_time,
                    total_time);
-            printf("[ %d ] AVERAGES: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs ,KL=%.3fs , Compress=%.3fs per round,  Other=%.3fs\n",
+            printf("[ %d ] AVERAGES: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs ,KL=%.3fs , Compress=%.3fs , Decompress=%.3fs per round, Other=%.3fs\n",
                    total_walk_time/round_walk_times.size(), total_dump_time/round_walk_times.size(),
-                   total_wait_time/round_walk_times.size(), total_KL_time/round_walk_times.size(), total_Compress_time/round_walk_times.size(),other_time/round_walk_times.size());
+                   total_wait_time/round_walk_times.size(), total_KL_time/round_walk_times.size(), total_Compress_time/round_walk_times.size(), total_Decompress_time/round_walk_times.size(), other_time/round_walk_times.size());
             this->waiting_time = total_wait_time;
             printf("========================================================================\n\n");
         }
@@ -1205,6 +1226,10 @@ public:
                 active_walker_num >= PHASED_EXECTION_THRESHOLD * this->partition_num
             );
             this->msg_time += msg_timer.duration();
+            this->last_walk_compute_time = this->last_msg_producer_time;
+            this->walk_compute_time += this->last_walk_compute_time;
+            this->last_walk_comm_time = this->last_msg_comm_time;
+            this->walk_comm_time += this->last_walk_comm_time;
         }
     }
     
