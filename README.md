@@ -1,15 +1,13 @@
 
-## This codebase gives the reference implementation of [DistGER](https://www.vldb.org/pvldb/vol16/p1643-fang.pdf) as described in the paper:
-Distributed Graph Embedding with Information-Oriented Random Walks. <br>
-Peng Fang, Arijit Khan, Siqiang Luo, Fang Wang, Dan Feng, Zhenli Li, Wei Yin and Yuchao Cao <br>
-Published to [49th International Conference on Very Large Data Bases (VLDB 2023)](https://vldb.org/2023/) <br>
+## FeLoG
+This codebase gives the reference implementation of FeLoG
 
 
 
 # Prerequisites
 
-- Ubuntu 16.04
-- Linux kernel 4.15.0
+- Ubuntu 20.04
+- Linux kernel 5.4.0
 - g++ 9.4.0
 - CMake 3.10.2
 - [MPICH 3.4.2](https://www.mpich.org)
@@ -19,11 +17,11 @@ Published to [49th International Conference on Very Large Data Bases (VLDB 2023)
 
 The evaluated dataset Youtube and LiveJournal are prepraed in the "dataset" directory.
 
-Since the the space limited of the repository, the other datasets [Twitter](https://law.di.unimi.it/datasets.php), [Com-Orkut](https://snap.stanford.edu/) and [Flickr](http://datasets.syr.edu/pages/datasets.html) can be found in their open resource.
+Since the the space limited of the repository, the other datasets [Twitter](https://law.di.unimi.it/datasets.php), [Com-Orkut](https://snap.stanford.edu/), [Flickr](http://datasets.syr.edu/pages/datasets.html)，[U.K.-2007](https://law.di.unimi.it/webdata/uk-2007-05/) and [OGB-papers100M](https://snap.stanford.edu/ogb/data/nodeproppred/) can be found in their open resource.
 
 # Setup
 
-First Compile DistGER with CMake:
+First Compile FeLoG with CMake:
 
 ```
 mkdir build && cd build
@@ -69,7 +67,7 @@ mkdir out
 
 ### Run in Single-machine Environment
 ```
-mpiexec -n 8 ./bin/huge_walk -g ../dataset/LJ-8.data-r -p ../dataset/LJ-8.part -v 2238731 -w 2238731 --make-undirected -o ./out/walks.txt -eoutput ./out/LJ-r_emb.txt -size 128 -iter 1 -threads 72 -window 10 -negative 5  -batch-size 21 -min-count 0 -sample 1e-3 -alpha 0.01 -debug 2
+mpirun -np 8 ./bin/huge_walk -g ../dataset/LJ-8.data-r -p ../dataset/LJ-8.part -v 2238731 -w 2238731 --min_L 20 --min_R 2 -o ./out/LJ --make-undirected -emb_output ./out/LJ_emb.txt -size 128 -iter 1 -threads 72 -window 10 -negative 5 -batch-size 21 -min-count 0 -sample 1e-3 -alpha 0.01 -cbow 0 -reuse-neg 0 -debug 2
 ```
 
 ### Run in Distributed Environment
@@ -78,22 +76,8 @@ mpiexec -n 8 ./bin/huge_walk -g ../dataset/LJ-8.data-r -p ../dataset/LJ-8.part -
 - Invoke the application with MPI 
 
 ```
-mpiexec -hostfile ./hosts -n 8 ./bin/huge_walk -g ../dataset/LJ-8.data-r -p ../dataset/LJ-8.part -v 2238731 -w 2238731 --make-undirected -o ./out/walks.txt -eoutput ./out/LJ-r_emb.txt -size 128 -iter 1 -threads 72 -window 10 -negative 5  -batch-size 21 -min-count 0 -sample 1e-3 -alpha 0.01 -debug 2
+mpirun -hostfile ./hosts -np 8 ./bin/huge_walk -g ../dataset/LJ-8.data-r -p ../dataset/LJ-8.part -v 2238731 -w 2238731 --min_L 20 --min_R 2 -o ./out/LJ --make-undirected -emb_output ./out/LJ_emb.txt -size 128 -iter 1 -threads 72 -window 10 -negative 5 -batch-size 21 -min-count 0 -sample 1e-3 -alpha 0.01 -cbow 0 -reuse-neg 0 -debug 2
 ```
 
-### Check the output files in "out" directory
+**Check the output files in "out" directory**
 
-
-# Citing
-If you find *DistGER* useful for your research, please consider citing the following paper:
-```
-@article{fang2023distributed,
-  title={Distributed Graph Embedding with Information-Oriented Random Walks},
-  author={Fang, Peng and Khan, Arijit and Luo, Siqiang and Wang, Fang and Feng, Dan and Li, Zhenli and Yin, Wei and Cao, Yuchao},
-  journal = {Proc. VLDB Endow.},
-  year = {2023},
-  volume = {16},
-  number = {7},
-  pages = {1643–1656}
-}
-```
