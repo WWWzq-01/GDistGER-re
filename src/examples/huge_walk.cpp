@@ -24,23 +24,6 @@ struct TrainingConfig {
 };
 
 int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,SyncQueue& corpus_q,int _my_rank,myEdgeContainer *csr, const TrainingConfig& config);
-// train
-extern double training_time;
-extern double saving_embedding_time;
-// TrainModel time breakdown
-extern double train_model_init_time;
-extern double pure_training_time;
-extern double corpus_read_time;
-extern double corpus_copy_h2d_time;
-extern double emb_copy_d2h_time;
-extern double training_loop_time_accum;
-extern double training_kernel_time;
-extern double sync_spend_time;
-extern double evaluate_spend_time;
-extern double train_wait_walk_time;
-extern double train_wait_sync_time;
-// walk
-extern double walking_time;
 
 struct Empty
 {
@@ -134,24 +117,17 @@ int main(int argc, char **argv)
     };
 
     // =============== Walk Configuration Setup ===============
-    Timer setup_timer;
-    printf("[ %d ] Setting up walk configuration...\n", my_rank);
-    
+
     WalkerConfig<real_t, uint32_t> walker_conf(opt.walker_num);
     TransitionConfig<real_t, uint32_t> tr_conf(extension_comp);
-    walk_setup_time = setup_timer.duration();
-    printf("[ %d ] Walk configuration setup completed in %lf seconds\n", my_rank, walk_setup_time);
     
     for (int i = 0; i < 1; i++) // ???????????? for(int i = 0; i < 1; i++) 
     {
         int pid = get_mpi_rank();
         WalkConfig walk_conf;
         
-        // =============== Output Path Configuration (Potential I/O Bottleneck) ===============
-        Timer output_config_timer;
         if (!opt.output_path.empty())
         {
-            printf("[ %d ] Configuring output to disk: %s (POTENTIAL I/O BOTTLENECK)\n", my_rank, opt.output_path.c_str());
             std::cout<< opt.output_path <<std::endl;
             walk_conf.set_output_file(opt.output_path.c_str());
         }
@@ -159,23 +135,20 @@ int main(int argc, char **argv)
         {
             walk_conf.set_walk_rate(opt.rate);
         }
-        double output_config_time = output_config_timer.duration();
-        printf("[ %d ] Output configuration time: %lf seconds\n", my_rank, output_config_time);
-        
         // =============== Random Walk Execution ===============
         Timer walk_timer;
         printf("=================[ %d ] RANDOM WALK EXECUTION ================\n",my_rank);
         graph.random_walk(&walker_conf, &tr_conf, &walk_conf);
-        double sum_time = walk_timer.duration();
-        walk_execution_time = sum_time;
-        double walk_time = sum_time - graph.other_time;
-        printf("[p%u][WALK EXECUTION] Total: %lf s, Pure walk: %lf s, Other: %lf s\n", 
-               graph.get_local_partition_id(), sum_time, walk_time, graph.other_time);
+        // double sum_time = walk_timer.duration();
+        // walk_execution_time = sum_time;
+        // double walk_time = sum_time - graph.other_time;
+        // printf("[p%u][WALK EXECUTION] Total: %lf s, Pure walk: %lf s, Other: %lf s\n", 
+        //        graph.get_local_partition_id(), sum_time, walk_time, graph.other_time);
         
-        // 使用内存管道，无磁盘I/O
-        if (!opt.output_path.empty()) {
-            printf("[ %d ] *** USING MEMORY PIPELINE (NO DISK I/O) *** \n", my_rank);
-        }
+        // // 使用内存管道，无磁盘I/O
+        // if (!opt.output_path.empty()) {
+        //     printf("[ %d ] *** USING MEMORY PIPELINE (NO DISK I/O) *** \n", my_rank);
+        // }
     }
     printf("> [p%d RANDOM WALKING TIME:] %lf \n",get_mpi_rank(), timer.duration());
 
@@ -189,88 +162,10 @@ int main(int argc, char **argv)
         }
     }
 
-
-    // // =============== Information Feedback Collection ===============
-    // Timer feedback_timer;
-    // printf("[ %d ] Collecting information feedback data...\n", my_rank);
-    // MPI_Allreduce(MPI_IN_PLACE,graph.vertex_cn.data(), graph.get_vertex_num(), get_mpi_data_type<int>(), MPI_SUM, MPI_COMM_WORLD);
-    // double feedback_time = feedback_timer.duration();
-    // printf("[ %d ] Information feedback collection completed in %lf seconds\n", my_rank, feedback_time);
-
-    // // =============== Corpus Compression Statistics ===============
-    // printf("[ %d ] Displaying compression statistics (computed during walk)...\n", my_rank);
-    
-    // // Use saved compression statistics (calculated before move during walk)
-    // size_t origin_size = graph.saved_origin_size;
-    // size_t compress_size = graph.saved_compress_size;
-    // corpus_compression_time = 0.0;  // Compression was done during walk, so no additional time here
-    
-    // cout << "Original size: " << origin_size * 4 << " Byte." << endl;
-    // cout <<"Top compress size: " << compress_size << " Byte." << endl;
-    // cout <<"Top Ratio: " << (origin_size > 0 ? (float)compress_size/(origin_size * 4) : 0.0f) << endl;
-
-    // // Use saved theoretical compression size
-    // size_t theory_compress_size = graph.saved_theory_compress_size;
-    // cout << "Original size: " << origin_size * 4 << " Byte." << endl;
-    // cout <<"Theory compress size: " << theory_compress_size * 4 << " Byte." << endl;
-    // cout <<"Ratio: " << (origin_size > 0 ? (float)theory_compress_size/origin_size : 0.0f) << endl;
-
-    // =============== Wait for Training Completion ===============
-    Timer training_wait_timer;
-    printf("[ %d ] Waiting for training thread to complete...\n", my_rank);
     train_thread.join();
-    double thread_join_time = training_wait_timer.duration();
-    // training_time = training_time;  // Use actual training time from training thread
-    printf("[ %d ] Training thread join completed in %lf seconds (join wait time)\n", my_rank, thread_join_time);
-    printf("[ %d ] Actual training execution time: %lf seconds\n", my_rank, training_time);
-    
+
     double total_time = timer.duration();
     
-    // =============== PERFORMANCE ANALYSIS REPORT ===============
-    if (my_rank == 0) {
-        printf("\n");
-        printf("=================== PERFORMANCE ANALYSIS REPORT ===================\n");
-        printf("Total execution time: %lf seconds\n", total_time);
-        printf("---------------------------------------------------------------------\n");
-        printf("1. Graph loading time:          %lf s  (%.2f%% of total)\n", 
-               load_graph_time, (load_graph_time/total_time)*100);
-        printf("2. Data conversion time:        %lf s  (%.2f%% of total)\n", 
-               data_conversion_time, (data_conversion_time/total_time)*100);
-        printf("3. Walk setup time:             %lf s  (%.2f%% of total)\n", 
-               walk_setup_time, (walk_setup_time/total_time)*100);
-        printf("4. Walk execution time:         %lf s  (%.2f%% of total)\n", 
-               walk_execution_time, (walk_execution_time/total_time)*100);
-        printf("   - Pure walk time:            %lf s  (%.2f%% of walk)\n", graph.walk_time, (graph.walk_time/walk_execution_time)*100);
-        printf("        - Message passing time:      %lf s\n", graph.msg_time);
-        printf("   - Waiting time (hasResource): %lf s  (%.2f%% of walk)\n", graph.waiting_time, (graph.waiting_time/walk_execution_time)*100);
-        printf("   - Assemble time:             %lf s  (%.2f%% of walk)\n", graph.assemble_time, (graph.assemble_time/walk_execution_time)*100);
-        printf("   - Dump time:                 %lf s  (%.2f%% of walk)\n", graph.dump_time, (graph.dump_time/walk_execution_time)*100);
-        printf("   - Compress time:             %lf s  (%.2f%% of walk)\n", graph.compress_time, (graph.compress_time/walk_execution_time)*100);
-        // printf("   - Other operations:          %lf s\n", graph.other_time);
-        printf("5. Corpus compression time:     %lf s  (%.2f%% of total)\n", 
-               corpus_compression_time, (corpus_compression_time/total_time)*100);
-        printf("6. Training time:               %lf s  (%.2f%% of total)\n", 
-               training_time, (training_time/total_time)*100);
-        printf("   - Memory-based training (no disk I/O)\n");
-        printf("   - Saving embeddings                      %lf s  (%.2f%% of training_time)\n", saving_embedding_time, (saving_embedding_time/training_time)*100);
-        printf("   - Training Model intra initialization    %lf s  (%.2f%% of training_time)\n", train_model_init_time, (train_model_init_time/training_time)*100);
-        printf("   - Synchronization time                   %lf s  (%.2f%% of training_time)\n", sync_spend_time, (sync_spend_time/training_time)*100);
-        printf("   - Evaluation time                        %lf s  (%.2f%% of training_time)\n", evaluate_spend_time, (evaluate_spend_time/training_time)*100);
-        printf("   - Wait Walking time                      %lf s  (%.2f%% of training_time)\n", train_wait_walk_time, (train_wait_walk_time/training_time)*100);
-        printf("   - Pure training execution time           %lf s  (%.2f%% of training_time)\n",  pure_training_time, (pure_training_time/training_time)*100);
-        printf("        - Corpus read time                      %lf s   (%.2f%% of pure training)\n", corpus_read_time, (corpus_read_time/pure_training_time)*100);
-        printf("        - H2D copy time                         %lf s   (%.2f%% of pure training)\n", corpus_copy_h2d_time, (corpus_copy_h2d_time/pure_training_time)*100);
-        printf("        - Kernel execution time                 %lf s   (%.2f%% of pure training)\n", training_kernel_time, (training_kernel_time/pure_training_time)*100);
-        printf("        - Training loop time                    %lf s   (%.2f%% of pure training)\n", training_loop_time_accum, (training_loop_time_accum/pure_training_time)*100);
-        printf("        - Embedding copy back                   %lf s   (%.2f%% of pure training)\n", emb_copy_d2h_time, (emb_copy_d2h_time/pure_training_time)*100);
-        printf("        - Wait Synchronization time             %lf s   (%.2f%% of pure training)\n", train_wait_sync_time, (train_wait_sync_time/pure_training_time)*100);
-        printf("---------------------------------------------------------------------\n");
-        printf("*** MEMORY OPTIMIZATION ENABLED ***\n");
-        printf("Corpus data passed directly through memory pipeline.\n");
-        printf("Disk I/O eliminated for optimal performance.\n");
-        printf("=====================================================================\n");
-        printf("\n");
-    }
     
     printf("> [p%d WHOLE TIME:] %lf \n",get_mpi_rank(), total_time);
     printf("msgTime： %lf \n",graph.msg_time);

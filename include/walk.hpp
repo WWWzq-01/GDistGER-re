@@ -463,20 +463,8 @@ public:
 #endif
 
 public:
-    double other_time = 0.0;
-
-    double assemble_time = 0.0;
-    double compress_time = 0.0;
-    double decompress_time = 0.0;
-    double dump_time = 0.0;
-    double walk_time = 0.0;
-    double waiting_time = 0.0;
 
     double msg_time = 0.0;
-    double walk_compute_time = 0.0;
-    double walk_comm_time = 0.0;
-    double last_walk_compute_time = 0.0;
-    double last_walk_comm_time = 0.0;
     partition_id_t get_local_partition_id()
     {
         return this->local_partition_id;
@@ -669,10 +657,6 @@ public:
         walk_data.local_walkers = this->template alloc_array<Message<Walker<walker_data_t> > >(walker_array_size);
         walk_data.local_walkers_bak = this->template alloc_array<Message<Walker<walker_data_t> > >(walker_array_size);
 
-        this->walk_compute_time = 0.0;
-        this->walk_comm_time = 0.0;
-        this->last_walk_compute_time = 0.0;
-        this->last_walk_comm_time = 0.0;
 
         size_t max_msg_size = 0;
         if (order == 1)
@@ -735,14 +719,11 @@ public:
             internal_walk_epoch(&walk_data, walker_config, transition_config);
             pauseWalk.store(false, std::memory_order_relaxed);
             current_walk_time = walk_step_timer.duration();
-            this->walk_time += current_walk_time;
 
             if (walk_data.collect_path_flag)
             {
                 Timer timer_ap;
                 auto* paths = walk_data.pc->assemble_path(walker_begin);
-                this->other_time+= timer_ap.duration();
-                this->assemble_time += timer_ap.duration();
 
                 if (walk_config->output_file_flag)
                 {
@@ -753,11 +734,7 @@ public:
                     cout << "int iter: "<< iter << " string iter: " << s_iter <<endl;
                     cout<< "output_path_prefix : " << walk_config->output_path_prefix <<endl;
                     string local_output_path = walk_config->output_path_prefix +"-" + s_rank+"-"+s_iter+".txt";
-                    Timer timer_dump;
                     paths->dump(local_output_path.c_str(), "w", walk_config->print_with_head_info, context_map_freq,this->local_corpus,this->vertex_cn,this->co_occor);
-                    corpus_dump_time = timer_dump.duration();
-                    this->other_time += corpus_dump_time;
-                    this->dump_time += timer_dump.duration();
                     
                     Timer wait_timer;
                     unique_lock<mutex> lock(mtx);
@@ -767,8 +744,6 @@ public:
                     // if hasResource = true, then block the walking
                     hasResource = true;
                     
-                    Timer compress_timer;
-                    double decompress_elapsed = 0.0;
                     size_t corpus_size = this->local_corpus.size();  // Save size before move
                     
                     // Calculate compression statistics before move
@@ -787,16 +762,10 @@ public:
                     }
                     
                     this->out_queue.push(std::move(this->local_corpus));  // Use move semantics to avoid copying
-                    compress_time = compress_timer.duration();
-                    this->compress_time += compress_time;
-                    printf("this->compress_time: %.3fs, compress_time: %.3f\n", this->compress_time, compress_time);
 
-                    Timer decompress_timer;
                     corpus_t decompressed_dummy;
                     compressor.uncompressCorpus(decompressed_dummy, compress_corpus);
-                    decompress_elapsed = decompress_timer.duration();
-                    this->decompress_time += decompress_elapsed;
-                    printf("this->decompress_time: %.3fs, decompress_time: %.3f\n", this->decompress_time, decompress_elapsed);
+
 
                     cv.notify_one();
                     test_time = test_timer.duration();
@@ -845,28 +814,8 @@ public:
                     {
                         std::cout << "Delat RE：" << abs(delta_H) << std::endl;
                     }
-                    KL_time = KL_timer.duration();
-                    // test_time = test_timer.duration();
-                    // Record round timing statistics
-                    double total_round_time = round_timer.duration();
-                    if (walk_config->output_file_flag) {
-                        round_walk_times.push_back(current_walk_time);
-                        round_dump_times.push_back(corpus_dump_time);
-                        round_wait_times.push_back(wait_time);
-                        round_KL_times.push_back(KL_time);
-                        round_compress_timtes.push_back(compress_time);
-                        round_decompress_times.push_back(decompress_elapsed);
-                        total_round_times.push_back(total_round_time);
-                        printf("[ %d ] === ROUND %d COMPLETED === Total: %.3fs, Walk: %.3fs, Corpus: %.3fs, Wait: %.3fs, KL: %.3fs, Compress: %.3fs, Decompress: %.3fs\n", 
-                               get_mpi_rank(), iter, total_round_time, current_walk_time, corpus_dump_time, wait_time, KL_time, compress_time, decompress_elapsed);
-                    }
-                    
-                    // iter = iter == 0 ? init_round + 1 : iter + 1;
+
                     iter++;
-                    // if(stop_sampling_flag == true){
-                    //     printf("[ %d ] STOP_SAMPLING_FLAG SET \n",get_mpi_rank());
-                    //     terminal_flag = true;
-                    // }
                     if(stop_sampling_flag){ 
                         terminal_flag = true;
                         remained_walker = 0;
@@ -906,45 +855,9 @@ public:
             }
         }
 
-        // Print detailed round-level timing statistics
-        if (!round_walk_times.empty()) {
-            printf("\n================== [ %d ] ROUND-LEVEL TIMING STATISTICS ==================\n", get_mpi_rank());
-            double total_walk_time = 0.0, total_dump_time = 0.0, total_wait_time = 0.0, other_time = 0.0, total_time = 0.0;
-            double total_KL_time = 0.0, total_Compress_time = 0.0, total_Decompress_time = 0.0;
-
-
-            for (size_t i = 0; i < round_walk_times.size(); i++) {
-                total_walk_time += round_walk_times[i];
-                total_dump_time += round_dump_times[i];
-                total_wait_time += round_wait_times[i];
-                total_KL_time += round_KL_times[i];
-                total_Compress_time += round_compress_timtes[i];
-                total_Decompress_time += round_decompress_times[i];
-                total_time += total_round_times[i];
-                other_time = total_round_times[i] - (round_walk_times[i] + round_dump_times[i] + round_wait_times[i]+ round_KL_times[i]+round_compress_timtes[i] + round_decompress_times[i]);
-                printf("[ %d ] Round %2zu: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Decompress=%.3fs, Other=%.3fs, Total=%.3fs\n",
-                          get_mpi_rank(),
-                       i+1, round_walk_times[i], round_dump_times[i], round_wait_times[i],
-                       round_KL_times[i], round_compress_timtes[i], round_decompress_times[i], other_time,
-                       total_round_times[i]);
-            }
-            
-            printf("========================================================================\n");
-            other_time = total_time - (total_walk_time + total_dump_time + total_wait_time + total_KL_time + total_Compress_time + total_Decompress_time);
-            printf("[ %d ] SUMMARY: Rounds=%zu, Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs, KL=%.3fs, Compress=%.3fs, Decompress=%.3fs, Other=%.3fs, Total=%.3fs\n",
-                   get_mpi_rank(), round_walk_times.size(), total_walk_time, total_dump_time, total_wait_time, total_KL_time, total_Compress_time, total_Decompress_time, other_time,
-                   total_time);
-            printf("[ %d ] AVERAGES: Walk=%.3fs, Dump Corpus=%.3fs, Wait=%.3fs ,KL=%.3fs , Compress=%.3fs , Decompress=%.3fs per round, Other=%.3fs\n",
-                   total_walk_time/round_walk_times.size(), total_dump_time/round_walk_times.size(),
-                   total_wait_time/round_walk_times.size(), total_KL_time/round_walk_times.size(), total_Compress_time/round_walk_times.size(), total_Decompress_time/round_walk_times.size(), other_time/round_walk_times.size());
-            this->waiting_time = total_wait_time;
-            printf("========================================================================\n\n");
-        }
-
         this->dealloc_array(walk_data.local_walkers, walker_array_size);
         this->dealloc_array(walk_data.local_walkers_bak, walker_array_size);
-        walking_time = actual_walking_timer.duration();
-        printf("[ %d ] ALL ROUNDS COMPLETED, Actual Walking Time: %.3fs\n", get_mpi_rank(), walking_time);
+
     }
 
     void internal_random_walk_wrap (WalkerConfig<edge_data_t, walker_data_t> *walker_config, TransitionConfig<edge_data_t, walker_data_t> *transition_config, WalkConfig *walk_config)
@@ -1226,10 +1139,6 @@ public:
                 active_walker_num >= PHASED_EXECTION_THRESHOLD * this->partition_num
             );
             this->msg_time += msg_timer.duration();
-            this->last_walk_compute_time = this->last_msg_producer_time;
-            this->walk_compute_time += this->last_walk_compute_time;
-            this->last_walk_comm_time = this->last_msg_comm_time;
-            this->walk_comm_time += this->last_walk_comm_time;
         }
     }
     
