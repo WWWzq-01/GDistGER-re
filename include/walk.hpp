@@ -683,14 +683,14 @@ public:
             walker_id_t walker_begin = walker_num - remained_walker;
             walk_data.active_walker_num = std::min(remained_walker, walker_per_iter);
             remained_walker -= walk_data.active_walker_num;
-            std::cout << "walk_data.active_walker_num = " << walk_data.active_walker_num << std::endl;
+            // std::cout << "walk_data.active_walker_num = " << walk_data.active_walker_num << std::endl;
 
             walk_data.local_walker_num = init_walkers(walk_data.local_walkers, walk_data.local_walkers_bak, walker_begin, walker_begin + walk_data.active_walker_num, walker_config->walker_init_dist_func, walker_config->walker_init_state_func);
-            printf("\n【 %d Round %d  Walker Num: %d】 \n",get_mpi_rank(),iter,walk_data.local_walker_num);
+            // printf("\n【 %d Round %d  Walker Num: %d】 \n",get_mpi_rank(),iter,walk_data.local_walker_num);
 
             if (walk_data.collect_path_flag)
             {
-                std::cout << "walk_data.local_walker_num = " << walk_data.local_walker_num << std::endl;
+                // std::cout << "walk_data.local_walker_num = " << walk_data.local_walker_num << std::endl;
 #pragma omp parallel for
                 for (walker_id_t w_i = 0; w_i < walk_data.local_walker_num; w_i++)
                 {
@@ -763,7 +763,7 @@ public:
                         assert(degree_sum >= 0);
                         assert(degree_sum < UINT64_MAX);
                     }
-                    std::cout << "words_sum = " << words_sum << " degree_sum = " << degree_sum << std::endl;
+                    // std::cout << "words_sum = " << words_sum << " degree_sum = " << degree_sum << std::endl;
                     double h = 0.0;
                     for(int i = 0; i < this->v_num; i++)
                     {
@@ -787,11 +787,11 @@ public:
                     
                     H.push_back(h);
                     double delta_H = H.size() == 1 ? H[H.size() - 1] : H[H.size() - 1] - H[H.size() - 2];
-                    std::cout << "abs(delta_H) = " << abs(delta_H) << std::endl;
+                    // std::cout << "abs(delta_H) = " << abs(delta_H) << std::endl;
                     assert(abs(delta_H) >= 0);
                     if(this->local_partition_id == 0)
                     {
-                        std::cout << "Delat RE：" << abs(delta_H) << std::endl;
+                        // std::cout << "Delat RE：" << abs(delta_H) << std::endl;
                     }
 
                     iter++;

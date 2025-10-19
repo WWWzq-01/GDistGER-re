@@ -844,9 +844,9 @@ public:
 #ifdef PERF_PROF
             if (this->local_partition_id == 0)
             {
-                std::cout << "[partition " << static_cast<int>(p_i) << ":] (Start " << vertex_partition_begin[p_i] << " End: " << vertex_partition_end[p_i] 
-                << ") (Workload: " << workload << "Each machine Workload: " << workload_per_node << " ) "<< " Vertex Num " << vertex_partition_end[p_i] - vertex_partition_begin[p_i] << std::endl;
-                // printf("partition %d: %u %u (%zu %zu)\n", p_i, vertex_partition_begin[p_i], vertex_partition_end[p_i], workload, workload_per_node);
+                // std::cout << "[partition " << static_cast<int>(p_i) << ":] (Start " << vertex_partition_begin[p_i] << " End: " << vertex_partition_end[p_i] 
+                // << ") (Workload: " << workload << "Each machine Workload: " << workload_per_node << " ) "<< " Vertex Num " << vertex_partition_end[p_i] - vertex_partition_begin[p_i] << std::endl;
+                // // printf("partition %d: %u %u (%zu %zu)\n", p_i, vertex_partition_begin[p_i], vertex_partition_end[p_i], workload, workload_per_node);
             }
 #endif
         }
@@ -880,9 +880,9 @@ public:
         {
             this->local_e_num += this->vertex_out_degree[v_i];
         }
-        printf("[partition %d]begin:%u end:%u num:%u degree:%lu\n",
-        static_cast<int>(this->local_partition_id),vertex_partition_begin[local_partition_id],vertex_partition_end[local_partition_id],
-        vertex_partition_end[local_partition_id]-vertex_partition_begin[local_partition_id],local_e_num);
+        // printf("[partition %d]begin:%u end:%u num:%u degree:%lu\n",
+        // static_cast<int>(this->local_partition_id),vertex_partition_begin[local_partition_id],vertex_partition_end[local_partition_id],
+        // vertex_partition_end[local_partition_id]-vertex_partition_begin[local_partition_id],local_e_num);
 
         Edge<edge_data_t> *local_edges = new Edge<edge_data_t>[local_e_num];
 

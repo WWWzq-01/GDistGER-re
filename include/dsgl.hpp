@@ -1481,7 +1481,7 @@ int dsgl(int argc, char **argv, vector<int> *vertex_cn, vector<vertex_id_t> *_ne
     // std::string log_path = "./log/" + std::string(hostname)+ ".log";
     // flog = fopen(log_path.c_str(),"w");
 
-    printf("processor name: %s, number of processors: %d, rank: %d\n", hostname, num_procs, my_rank);
+    // printf("processor name: %s, number of processors: %d, rank: %d\n", hostname, num_procs, my_rank);
 
     MPI_Barrier(MPI_COMM_WORLD);
 

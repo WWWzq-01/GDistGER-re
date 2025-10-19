@@ -101,9 +101,9 @@ struct PathSet
         // fclose(f);  // Disabled disk write
         double processing_time = timer.duration();
         // total_disk_write_time += write_time;  // No longer tracking disk write time
-        printf("p%d null sen: %zu\n",get_mpi_rank(),null_sen);
+        // printf("p%d null sen: %zu\n",get_mpi_rank(),null_sen);
 #ifndef UNIT_TEST
-        printf("[p%d] finish corpus processing in %lf seconds \n",get_mpi_rank(), processing_time);
+        // printf("[p%d] finish corpus processing in %lf seconds \n",get_mpi_rank(), processing_time);
 #endif
        
     }

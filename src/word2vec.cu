@@ -955,8 +955,8 @@ void LearnVocabFromTrainFile() {
   }
   SortVocab();
   if (debug_mode > 0) {
-    printf("Vocab size: %lld\n", vocab_size);
-    printf("Words in train file: %lld\n", train_words); 
+    // printf("Vocab size: %lld\n", vocab_size);
+    // printf("Words in train file: %lld\n", train_words); 
   }
   file_size = ftell(fin);
   fclose(fin);
@@ -993,8 +993,8 @@ void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
   SortVocab();
 
   if (debug_mode > 0) {
-    printf("Vocab size: %lld\n", vocab_size);
-    printf("Words in train file: %lld\n", train_words);
+    // printf("Vocab size: %lld\n", vocab_size);
+    // printf("Words in train file: %lld\n", train_words);
   }
 
   id2offset.resize(vocab_size);
@@ -1026,8 +1026,8 @@ void ReadVocab() {
   }
   SortVocab();
   if (debug_mode > 0) {
-    printf("Vocab size: %lld\n", vocab_size);
-    printf("Words in train file: %lld\n", train_words);
+    // printf("Vocab size: %lld\n", vocab_size);
+    // printf("Words in train file: %lld\n", train_words);
   }
   fin = fopen(train_file, "rb");
   if (fin == NULL) {
@@ -1048,7 +1048,7 @@ void InitNet() {
   if (last_emb == NULL) {printf("Memory allocation failed\n"); exit(1);}
   
   a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(float));
-  int hs_cuda = 0,neg_cuda=0;
+
   if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
   if (hs) {
     a = posix_memalign((void **)&syn1, 128, (long long)vocab_size * layer1_size * sizeof(float));
@@ -1056,7 +1056,7 @@ void InitNet() {
     for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++)
       syn1[a * layer1_size + b] = 0;
     checkCUDAerr(cudaMalloc((void **)&d_syn1, (long long)vocab_size * layer1_size * sizeof(float)));
-    hs_cuda = vocab_size * layer1_size * sizeof(float) / (1024 * 1024);
+
     checkCUDAerr(cudaMemcpy(d_syn1, syn1, (long long)vocab_size * layer1_size * sizeof(float), cudaMemcpyHostToDevice));
   }
   if (negative>0) {
@@ -1065,7 +1065,7 @@ void InitNet() {
     for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++)
       syn1neg[a * layer1_size + b] = 0;
     checkCUDAerr(cudaMalloc((void **)&d_syn1, (long long)vocab_size * layer1_size * sizeof(float)));
-    neg_cuda = vocab_size * layer1_size * sizeof(float) / (1024 * 1024);
+
     checkCUDAerr(cudaMemcpy(d_syn1, syn1neg, (long long)vocab_size * layer1_size * sizeof(float), cudaMemcpyHostToDevice));
   }
   for (a = 0; a < vocab_size; a++) for (b = 0; b < layer1_size; b++) {
@@ -1073,7 +1073,7 @@ void InitNet() {
     syn0[a * layer1_size + b] = (((next_random & 0xFFFF) / (float)65536) - 0.5) / layer1_size;
   }
   checkCUDAerr(cudaMalloc((void **)&d_syn0, (long long)vocab_size * layer1_size * sizeof(float)));
-  int syn0_cuda = vocab_size * layer1_size * sizeof(float) / (1024 * 1024);
+
   checkCUDAerr(cudaMemcpy(d_syn0, syn0, (long long)vocab_size * layer1_size * sizeof(float), cudaMemcpyHostToDevice));
 
   CreateBinaryTree();
@@ -1211,7 +1211,7 @@ void sync_embedding_func()
   Timer sync_timer;
   int wait_time = 1000;
   chrono::steady_clock::time_point syncTime = chrono::steady_clock::now() + chrono::milliseconds(wait_time);
-  int sync_times = 1;
+  // int sync_times = 1;
   while(!halt_sync)
   {
     sleep(wait_time/1000);
@@ -1303,7 +1303,7 @@ void sync_embedding_func()
     syncTime = chrono::steady_clock::now() + chrono::milliseconds(wait_time); // next sync time.
     trainBlocked = false; // unblock the traing thread.
     sync_cv.notify_one(); // wake trainer
-    printf("[ %d ] Syncing Times No.%d, sync %d nodes\n",my_rank,sync_times++, sync_node_num);
+    // printf("[ %d ] Syncing Times No.%d, sync %d nodes\n",my_rank,sync_times++, sync_node_num);
   }
 }
 
@@ -1480,13 +1480,12 @@ void TrainModelThread(string data_path)
 // New function to train directly with memory corpus data (no disk I/O)
 void TrainModelThreadMemory(const corpus_t& corpus_data)
 {
-  printf("[ p%d ]=====================Train memory corpus (size: %zu)============\n", my_rank, corpus_data.size());
+  // printf("[ p%d ]=====================Train memory corpus (size: %zu)============\n", my_rank, corpus_data.size());
   long long word, word_count = 0, last_word_count = 0;
   long long local_iter = iter;
 
   // use in kernel
-  Timer cuda_mem_init_timer;
-  double init_time = 0.0;
+
   int total_sent_len, reduSize = 32;
   int *sen, *sentence_length, *d_sen, *d_sent_len;
   sen = (int *)malloc(MAX_SENTENCE * 100 * sizeof(int));
@@ -1542,9 +1541,6 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
     while (cnt_sentence < MAX_SENTENCE && corpus_index < corpus_data.size()) {
       const auto& sequence = corpus_data[corpus_index];
       int temp_sent_len = 0;
-      double iter_vocab_time = 0.0;
-      double iter_subsampling_time = 0.0;
-      double iter_sentence_building_time = 0.0;
       for (auto vertex_id : sequence) {
         word = id2offset[vertex_id];  // Convert vertex ID to vocab index
         if (word == -1) {
@@ -2280,7 +2276,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
   starting_alpha = alpha;
   ReadVocabFromDegree(g_v_degree);
   printf("========================Read Vocab ok=======================\n");
-  printf("vocab_size: %lu\n",vocab_size);
+  // printf("vocab_size: %lu\n",vocab_size);
   // for(size_t i = 0; i < vocab_size * 0.10;i++){
   //   printf("id: %s, degree: %ld\n",vocab[i].word,vocab[i].cn);
   // }
@@ -2349,7 +2345,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     hasResource = false; // release slot for the next producer
     pauseWalk.store(false, std::memory_order_relaxed); // resume walking
     cv.notify_one();
-    cout << "====== POP CORPUS DATA (size: " << corpus_data.size() << ") ===" << endl;
+    // cout << "====== POP CORPUS DATA (size: " << corpus_data.size() << ") ===" << endl;
     train_iter++;
     alpha = lr_scheduler->get_lr();
     pause_sync = false;
@@ -2441,10 +2437,10 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     MPI_Barrier(MPI_EMB_COMM);
     halt_sync = true;
     sync_cv.notify_all();
-    printf("[ %d ] Waiting Syncing Thread\n",my_rank);
+    // printf("[ %d ] Waiting Syncing Thread\n",my_rank);
     sync_thread->join();
     MPI_Barrier(MPI_EMB_COMM);
-    printf("[ %d ] Syncing Thread Halt\n",my_rank);
+    // printf("[ %d ] Syncing Thread Halt\n",my_rank);
     delete sync_thread;
   }
   
@@ -2558,7 +2554,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   MPI_Comm_rank(MPI_EMB_COMM, &my_rank);
   MPI_Get_processor_name(hostname, &hostname_len);
 
-  printf("processor name: %s, number of processors: %d, rank: %d\n", hostname, num_procs, my_rank);
+  // printf("processor name: %s, number of processors: %d, rank: %d\n", hostname, num_procs, my_rank);
 
   vertex_walker_stop_flag.assign(degrees.size(),0);
   g_v_degree.assign(degrees.begin(), degrees.end());
@@ -2655,7 +2651,7 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   TrainModel(corpus_q,csr,config);
 
-  printf("[ %d ] [Sync Time Spend: %f s]\n",my_rank,sync_spend_time);
+  // printf("[ %d ] [Sync Time Spend: %f s]\n",my_rank,sync_spend_time);
   // memory free
   free(table);
   free(syn0);

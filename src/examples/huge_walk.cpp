@@ -52,10 +52,10 @@ int main(int argc, char **argv)
 
     //=============== annotation line ===================
     graph.set_init_round(opt.init_round);
-    printf("opt min length: %d\n",opt.min_length);
+    // printf("opt min length: %d\n",opt.min_length);
     graph.set_minLength(opt.min_length);
-    printf("init_round = %d, min_length = %d\n", graph.init_round, graph.minLength);
-    printf("graph path: %s\n",opt.graph_path.c_str());
+    // printf("init_round = %d, min_length = %d\n", graph.init_round, graph.minLength);
+    // printf("graph path: %s\n",opt.graph_path.c_str());
     Timer load_timer;
     graph.load_graph(opt.v_num, opt.graph_path.c_str(), opt.partition_path.c_str(), opt.make_undirected);
     load_graph_time = load_timer.duration();
@@ -66,10 +66,7 @@ int main(int argc, char **argv)
     for (vertex_id_t v = 0; v < graph.v_num; v++){
         vertex_degree[v] = graph.vertex_out_degree[v];
     }
-    // =============== Data Structure Conversion ===============
-    Timer conversion_timer;
-    printf("[ %d ] Starting data structure conversion...\n", my_rank);
-    
+        
     //myEdgeContainer* myec = reinterpret_cast<myEdgeContainer*>(&graph.g_csr);
     //cout <<"myec access " << myec-> adj_lists[0].begin->neighbour<<endl; 
     myEdgeContainer* myec = new myEdgeContainer();
@@ -86,8 +83,6 @@ int main(int argc, char **argv)
      myec->adj_units[e_i].neighbour = graph.csr->adj_units[e_i].neighbour;
      myec->adj_units[e_i].data = graph.csr->adj_units[e_i].data;
     }
-    data_conversion_time = conversion_timer.duration();
-    printf("[ %d ] Data conversion completed in %lf seconds\n", my_rank, data_conversion_time);
     // cout <<my_rank <<" myec access " << myec-> adj_lists[110].begin->neighbour<<endl; 
     // cout << my_rank <<" graph.csr access " << graph.csr-> adj_lists[110].begin->neighbour<<endl; 
 
