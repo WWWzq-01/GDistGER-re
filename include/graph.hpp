@@ -213,22 +213,6 @@ public:
 
 protected:
 
-    void log_graph_alloc(const char* tag, size_t bytes) const
-    {
-        if (this->local_partition_id == 0)
-        {
-            printf("[MEM][GRAPH] %s -> %.2f MB\n", tag, bytes / (1024.0 * 1024.0));
-        }
-    }
-
-    void log_graph_release(const char* tag, size_t bytes) const
-    {
-        if (this->local_partition_id == 0)
-        {
-            printf("[MEM][GRAPH] %s freed %.2f MB\n", tag, bytes / (1024.0 * 1024.0));
-        }
-    }
-
     void set_graph_engine_concurrency(int worker_num_param)
     {
         this->worker_num = worker_num_param;
@@ -345,44 +329,36 @@ public:
     {
         if (vertex_partition_begin != nullptr)
         {
-            log_graph_release("vertex_partition_begin array", static_cast<size_t>(partition_num) * sizeof(vertex_id_t));
             delete []vertex_partition_begin;
         }
         if (vertex_partition_end != nullptr)
         {
-            log_graph_release("vertex_partition_end array", static_cast<size_t>(partition_num) * sizeof(vertex_id_t));
             delete []vertex_partition_end;
         }
 
         if (send_locks != nullptr)
         {
-            log_graph_release("send_locks", static_cast<size_t>(partition_num) * sizeof(std::mutex));
             delete []send_locks;
         }
         if (recv_locks != nullptr)
         {
-            log_graph_release("recv_locks", static_cast<size_t>(partition_num) * sizeof(std::mutex));
             delete []recv_locks;
         }
 
         if (vertex_in_degree != nullptr)
         {
-            log_graph_release("vertex_in_degree array", static_cast<size_t>(v_num) * sizeof(vertex_id_t));
             dealloc_vertex_array<vertex_id_t>(vertex_in_degree);
         }
         if (vertex_out_degree != nullptr)
         {
-            log_graph_release("vertex_out_degree array", static_cast<size_t>(v_num) * sizeof(vertex_id_t));
             dealloc_vertex_array<vertex_id_t>(vertex_out_degree);
         }
         if(vertex_freq != nullptr)
         {
-            log_graph_release("vertex_freq array", static_cast<size_t>(v_num) * sizeof(vertex_id_t));
             dealloc_vertex_array<vertex_id_t>(vertex_freq);
         }
         if (vertex_partition_id != nullptr)
         {
-            log_graph_release("vertex_partition_id array", static_cast<size_t>(v_num) * sizeof(partition_id_t));
             dealloc_vertex_array<partition_id_t>(vertex_partition_id);
         }
 
@@ -390,11 +366,9 @@ public:
         {
             if (csr->adj_lists != nullptr && csr->adj_list_count > 0)
             {
-                log_graph_release("csr adj_lists", static_cast<size_t>(csr->adj_list_count) * sizeof(AdjList<edge_data_t>));
             }
             if (csr->adj_units != nullptr && csr->adj_unit_count > 0)
             {
-                log_graph_release("csr adj_units", static_cast<size_t>(csr->adj_unit_count) * sizeof(AdjUnit<edge_data_t>));
             }
             delete csr;
             csr = nullptr;
@@ -403,7 +377,6 @@ public:
             delete co_occor;
         if (dist_exec_ctx.progress != nullptr)
         {
-            log_graph_release("dist_exec_ctx.progress", static_cast<size_t>(worker_num) * partition_num * sizeof(size_t));
             for (partition_id_t t_i = 0; t_i < worker_num; t_i++)
             {
                 delete []dist_exec_ctx.progress[t_i];
@@ -560,12 +533,10 @@ public:
 
       if (ec->adj_lists != nullptr)
       {
-          log_graph_release("csr local adj_lists", static_cast<size_t>(ec->adj_list_count) * sizeof(AdjList<edge_data_t>));
           delete []ec->adj_lists;
       }
       if (ec->adj_units != nullptr)
       {
-          log_graph_release("csr local adj_units", static_cast<size_t>(ec->adj_unit_count) * sizeof(AdjUnit<edge_data_t>));
           delete []ec->adj_units;
       }
 
@@ -573,8 +544,6 @@ public:
       ec->adj_units = new AdjUnit<edge_data_t>[edge_num];
       ec->adj_list_count = v_num;
       ec->adj_unit_count = edge_num;
-      log_graph_alloc("csr global adj_lists", static_cast<size_t>(v_num) * sizeof(AdjList<edge_data_t>));
-      log_graph_alloc("csr global adj_units", static_cast<size_t>(edge_num) * sizeof(AdjUnit<edge_data_t>));
       if(ec->adj_units == nullptr){
         printf("[ ERROR __FILE__:__LINE__ ] adj_units memory alloc fail\n");
       }
@@ -610,11 +579,9 @@ public:
 
         ec->adj_lists = new AdjList<edge_data_t>[v_num];
         ec->adj_list_count = v_num;
-        log_graph_alloc("csr local adj_lists", static_cast<size_t>(v_num) * sizeof(AdjList<edge_data_t>));
 
         ec->adj_units = new AdjUnit<edge_data_t>[local_edge_num];
         ec->adj_unit_count = local_edge_num;
-        log_graph_alloc("csr local adj_units", static_cast<size_t>(local_edge_num) * sizeof(AdjUnit<edge_data_t>));
         edge_id_t chunk_edge_idx = 0;
         for (vertex_id_t v_i = vertex_partition_begin[local_partition_id]; v_i < vertex_partition_end[local_partition_id]; v_i++)
         {
@@ -761,8 +728,6 @@ public:
         {
             read_graph(graph_path, local_partition_id, partition_num, read_edges, read_e_num);
             g_read_graph(graph_path,  g_read_edges, g_read_e_num);
-            log_graph_alloc("local read_edges buffer", static_cast<size_t>(read_e_num) * sizeof(Edge<edge_data_t>));
-            log_graph_alloc("global read_edges buffer", static_cast<size_t>(g_read_e_num) * sizeof(Edge<edge_data_t>));
             printf("[ %d ] read edge=========ok\n",local_partition_id);
         } else if (graph_format == GF_Edgelist)
         {
@@ -776,7 +741,6 @@ public:
         if (load_as_undirected)
         {
             Edge<edge_data_t> *undirected_edges = new Edge<edge_data_t>[read_e_num * 2];
-            log_graph_alloc("local undirected edges buffer", static_cast<size_t>(read_e_num) * 2 * sizeof(Edge<edge_data_t>));
 #pragma omp parallel for
             for (edge_id_t e_i = 0; e_i < read_e_num; e_i++)
             {
@@ -787,14 +751,12 @@ public:
                 undirected_edges[e_i * 2 + 1] = read_edges[e_i];
             }
             delete []read_edges;
-            log_graph_release("local read_edges buffer", static_cast<size_t>(read_e_num) * sizeof(Edge<edge_data_t>));
             read_edges = undirected_edges;
             read_e_num *= 2;
 
             printf("[ %d ] local load as undirected ok\n",local_partition_id);
             // For g_read_graph
             Edge<edge_data_t> *g_undirected_edges = new Edge<edge_data_t>[g_read_e_num * 2];
-            log_graph_alloc("global undirected edges buffer", static_cast<size_t>(g_read_e_num) * 2 * sizeof(Edge<edge_data_t>));
             #pragma omp parallel for
             for (edge_id_t e_i = 0; e_i < g_read_e_num; e_i++)
             {
@@ -805,7 +767,6 @@ public:
                 g_undirected_edges[e_i * 2 + 1] = g_read_edges[e_i];
             }
             delete []g_read_edges;
-            log_graph_release("global read_edges buffer", static_cast<size_t>(g_read_e_num) * sizeof(Edge<edge_data_t>));
             g_read_edges = g_undirected_edges;
             g_read_e_num *= 2;
         }
@@ -814,12 +775,8 @@ public:
         this->vertex_out_degree = alloc_vertex_array<vertex_id_t>();
         this->vertex_in_degree = alloc_vertex_array<vertex_id_t>();
         this->vertex_freq = alloc_vertex_array<vertex_id_t>();
-        log_graph_alloc("vertex_out_degree array", static_cast<size_t>(this->v_num) * sizeof(vertex_id_t));
-        log_graph_alloc("vertex_in_degree array", static_cast<size_t>(this->v_num) * sizeof(vertex_id_t));
-        log_graph_alloc("vertex_freq array", static_cast<size_t>(this->v_num) * sizeof(vertex_id_t));
 
         std::vector<vertex_id_t> local_vertex_degree(v_num, 0);
-        log_graph_alloc("local vertex degree vector", static_cast<size_t>(v_num) * sizeof(vertex_id_t));
 
         for (edge_id_t e_i = 0; e_i < read_e_num; e_i++) 
         {
@@ -849,13 +806,10 @@ public:
 
         size_t local_vertex_degree_bytes = local_vertex_degree.capacity() * sizeof(vertex_id_t);
         std::vector<vertex_id_t>().swap(local_vertex_degree);
-        log_graph_release("local vertex degree vector", local_vertex_degree_bytes);
 
 
         vertex_partition_begin = new vertex_id_t[partition_num];
         vertex_partition_end = new vertex_id_t[partition_num];
-        log_graph_alloc("vertex_partition_begin array", static_cast<size_t>(partition_num) * sizeof(vertex_id_t));
-        log_graph_alloc("vertex_partition_end array", static_cast<size_t>(partition_num) * sizeof(vertex_id_t));
 
         edge_id_t total_workload = 0;
         this->e_num = 0;
@@ -913,7 +867,6 @@ public:
         assert(this->vertex_partition_end[partition_num - 1] == v_num);
 
         this->vertex_partition_id = alloc_vertex_array<partition_id_t>();
-        log_graph_alloc("vertex_partition_id array", static_cast<size_t>(this->v_num) * sizeof(partition_id_t));
         for (partition_id_t p_i = 0; p_i < this->partition_num; p_i++)
         {
             for (vertex_id_t v_i = this->vertex_partition_begin[p_i]; v_i < this->vertex_partition_end[p_i]; v_i++)
@@ -932,7 +885,6 @@ public:
         vertex_partition_end[local_partition_id]-vertex_partition_begin[local_partition_id],local_e_num);
 
         Edge<edge_data_t> *local_edges = new Edge<edge_data_t>[local_e_num];
-        log_graph_alloc("local_edges buffer", static_cast<size_t>(local_e_num) * sizeof(Edge<edge_data_t>));
 
         shuffle_edges(read_edges, read_e_num, local_edges, local_e_num);
         printf("[ %d ] shuffle_edges ok\n",local_partition_id);
@@ -946,11 +898,8 @@ public:
         // printEdgeContainer(this->csr->adj_lists);
 
         delete []read_edges;
-        log_graph_release("local undirected edges buffer", static_cast<size_t>(read_e_num) * sizeof(Edge<edge_data_t>));
         delete []g_read_edges;
-        log_graph_release("global undirected edges buffer", static_cast<size_t>(g_read_e_num) * sizeof(Edge<edge_data_t>));
         delete []local_edges;
-        log_graph_release("local_edges buffer", static_cast<size_t>(local_e_num) * sizeof(Edge<edge_data_t>));
         // delete []local_edges;
         
         /******************************************这下面都是和锁有关*************************************/
