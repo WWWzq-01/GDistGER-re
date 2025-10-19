@@ -670,25 +670,9 @@ public:
         std::vector<double> H;
         bool terminal_flag = false;
         
-        // Round-level timing statistics
-        std::vector<double> round_walk_times;
-        std::vector<double> round_dump_times;
-        std::vector<double> round_wait_times;
-        std::vector<double> round_KL_times;
-        std::vector<double> round_compress_timtes;
-        std::vector<double> round_decompress_times;
-        std::vector<double> total_round_times;
-        
         while (remained_walker != 0)
         {
-            Timer round_timer;  // Timer for entire round
-            Timer walk_step_timer;  // Timer for walk execution only
-            double current_walk_time = 0.0;
-            double corpus_dump_time = 0.0;
-            double wait_time = 0.0;
-            double KL_time = 0.0;
-            double test_time = 0.0;
-            double compress_time = 0.0;
+
             
             printf("\n【 %d Round %d Started】 \n",get_mpi_rank(),iter);
             
@@ -714,11 +698,8 @@ public:
                 }
             }
 
-            Timer test_timer;
-            walk_step_timer.restart(); // Start timing the actual walk execution
             internal_walk_epoch(&walk_data, walker_config, transition_config);
             pauseWalk.store(false, std::memory_order_relaxed);
-            current_walk_time = walk_step_timer.duration();
 
             if (walk_data.collect_path_flag)
             {
@@ -731,15 +712,14 @@ public:
                     // std::string local_output_path = walk_config->output_path_prefix;
                     string s_iter = std::to_string(iter);
                     string s_rank = std::to_string(get_mpi_rank());
-                    cout << "int iter: "<< iter << " string iter: " << s_iter <<endl;
+                    // cout << "int iter: "<< iter << " string iter: " << s_iter <<endl;
                     cout<< "output_path_prefix : " << walk_config->output_path_prefix <<endl;
                     string local_output_path = walk_config->output_path_prefix +"-" + s_rank+"-"+s_iter+".txt";
                     paths->dump(local_output_path.c_str(), "w", walk_config->print_with_head_info, context_map_freq,this->local_corpus,this->vertex_cn,this->co_occor);
                     
-                    Timer wait_timer;
                     unique_lock<mutex> lock(mtx);
                     cv.wait(lock,[]{return !hasResource;});
-                    wait_time = wait_timer.duration();
+
                     
                     // if hasResource = true, then block the walking
                     hasResource = true;
@@ -768,10 +748,9 @@ public:
 
 
                     cv.notify_one();
-                    test_time = test_timer.duration();
-                    printf("test_time:%.3f\n",test_time);
-                    cout<< get_mpi_rank()<<"  =========== [ ROUND " << iter << " ] PUSH CORPUS DATA (size: " << corpus_size << "), Walk: " << current_walk_time << "s, Corpus: " << corpus_dump_time << "s, Wait: " << wait_time << "s ======" <<endl;
-                    Timer KL_timer;
+
+                    cout<< get_mpi_rank()<<"  =========== [ PUSH " << local_output_path <<"]======" <<endl;
+
                     MPI_Allreduce(context_map_freq.data(),  this->vertex_freq, this->v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
                     uint64_t words_sum = 0;
                     uint64_t degree_sum = 0;
@@ -905,7 +884,7 @@ public:
             #endif
             if(pauseWalk.load(std::memory_order_relaxed)) {
                 pauseWalk.store(false, std::memory_order_relaxed);
-                printf("[ %d ] PAUSE WALKING\n",get_mpi_rank());
+                // printf("[ %d ] PAUSE WALKING\n",get_mpi_rank());
                 active_walker_num = 0;
                 break;
             }

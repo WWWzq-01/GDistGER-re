@@ -1030,63 +1030,37 @@ void SaveVocab() {
 vector<vertex_id_t> id2offset;
 
 void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
-  Timer total_timer;
-  Timer section_timer;
 
   vertex_id_t v_num = degrees.size();
   char word[MAX_STRING];
 
   ResetAddWordToVocabProfile();
 
-  section_timer.restart();
   for (size_t hash_idx = 0; hash_idx < vocab_hash_size; ++hash_idx) vocab_hash[hash_idx] = -1;
-  double hash_init_time = section_timer.duration();
 
   vocab_size = 0;
-  section_timer.restart();
-  Timer sprintf_timer;
-  double sprintf_time = 0;
   for (vertex_id_t v = 0; v < v_num; v++)
   {
-    sprintf_timer.restart();
     std::sprintf(word,"%u",v);  // node ID 以字符串的形式存在 vocab 里面。
-    sprintf_time += sprintf_timer.duration();
     int idx = AddWordToVocab(word);
     vocab[idx].cn = degrees[v];
   }
-  double add_vocab_time = section_timer.duration();
+
   auto profile = GetAddWordToVocabProfile();
-  double add_word_avg = profile.call_count ? profile.total_time / static_cast<double>(profile.call_count) : 0.0;
-  printf("[ %d ] Sprintf time: %.3f,AddWordToVocab loop: %.3f\n", my_rank, sprintf_time, add_vocab_time - sprintf_time);
-  printf("[ %d ] AddWordToVocab stats: calls=%lld, total=%.3f s, avg=%.6e s\n",
-         my_rank, profile.call_count, profile.total_time, add_word_avg);
-  printf("[ %d ]   alloc=%.3f s, copy=%.3f s, realloc=%.3f s, hash=%.3f s, probe=%.3f s\n",
-         my_rank, profile.alloc_time, profile.copy_time, profile.realloc_time, profile.hash_time, profile.probe_time);
 
-  printf("[ %d ] Add Word To Vocab OK\n",my_rank);
-  printf("[ %d ] SortVocab Start\n",my_rank);
-
-  section_timer.restart();
   SortVocab();
-  double sort_time = section_timer.duration();
 
   if (debug_mode > 0) {
     printf("Vocab size: %lld\n", vocab_size);
     printf("Words in train file: %lld\n", train_words);
   }
 
-  section_timer.restart();
   id2offset.resize(vocab_size);
   for(vertex_id_t vi = 0; vi < vocab_size; vi++){
     char* endptr;
     vertex_id_t nid = (vertex_id_t)strtoul(vocab[vi].word, &endptr, 10);
     id2offset[nid] = vi;
-  }
-  double id_map_time = section_timer.duration();
-
-  double total_time = total_timer.duration();
-  printf("[ %d ] Vocab timings (s): hash_init=%.3f, add_vocab=%.3f, sort=%.3f, id_map=%.3f, total=%.3f\n",
-         my_rank, hash_init_time, add_vocab_time, sort_time, id_map_time, total_time);
+  };
 }
 
 void ReadVocab() {
@@ -1235,7 +1209,6 @@ void sgKernel(int *d_sen, int *d_sent_len, int *d_negSample, float alpha, int cn
                break;
     }
   } else {
-    printf("no reuseNeg\n");
     switch(reduSize) {
       case 32: skip_gram_kernel<16><<<gDim, bDim>>>
                 (window, layer1_size, negative, hs, table_size, vocab_size, alpha,
@@ -2321,7 +2294,7 @@ std::vector<float> batch_node_neighbor_direct_index(
         delete[] h_results;
     }
     
-    printf("[ %d ] GPU Direct Index: Completed processing %zu nodes\n", my_rank, all_results.size());
+    // printf("[ %d ] GPU Direct Index: Completed processing %zu nodes\n", my_rank, all_results.size());
     return all_results;
 }
 // ========================================================
