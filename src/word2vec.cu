@@ -288,7 +288,7 @@ __global__ void compute_kl_divergence_kernel(float *d_A,float *d_B, float *d_res
 		float p = sigmoid(d_A[idx]);
 		float q = sigmoid(d_B[idx]);
     // printf("sigmid(%d): %f, %f\n",idx,p,q);
-		// 计算相对熵的部分贡献
+		// Accumulate the partial KL divergence contribution
 		if(p > 0.0f && q > 0.0f){
 			float contribution = p * logf(p /q );
       // printf("compute kl idx: %d val: %.2f\n",idx, contribution);
@@ -983,7 +983,7 @@ void ReadVocabFromDegree(vector<vertex_id_t>& degrees){
   vocab_size = 0;
   for (vertex_id_t v = 0; v < v_num; v++)
   {
-    std::sprintf(word,"%u",v);  // node ID 以字符串的形式存在 vocab 里面。
+    std::sprintf(word,"%u",v);  // store node ID as string within vocab
     int idx = AddWordToVocab(word);
     vocab[idx].cn = degrees[v];
   }
@@ -1203,7 +1203,7 @@ double sync_spend_time = 0.0f;
 
 void sync_embedding_func()
 {
-  // 单机模式下不需要同步
+  // Skip synchronization in single-process runs
   if (num_procs == 1) {
     return;
   }
@@ -1240,7 +1240,7 @@ void sync_embedding_func()
     // sync_cv.notify_one(); // wake trainer
     // printf("[ %d ] Full sync completed, sync times: %d\n", my_rank, sync_times++);
     // syncTime = chrono::steady_clock::now() + chrono::milliseconds(1000); // next sync time
-    // continue; // 继续下一次同步循环，跳过部分同步逻辑
+    // continue; // Move to the next sync round and skip the remaining steps
     
     // copyFrom GPU, MPI, write back to GPU 
     //  No.1 pick up the sync id;
@@ -1357,7 +1357,7 @@ void TrainModelThread(string data_path)
 
   while (1) {
     unique_lock<mutex> lock(sync_mtx);
-    sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
+    sync_cv.wait(lock,[]{return !trainBlocked;});
                                                               
     if (word_count - last_word_count > 10000) {
       word_count_actual += word_count - last_word_count;
@@ -1516,11 +1516,11 @@ void TrainModelThreadMemory(const corpus_t& corpus_data)
 
   
   while (corpus_index < corpus_data.size()) {
-    // 多进程环境下才需要等待同步
+    // Only wait for synchronization when running across multiple processes
     // OPTIMIZATION: No need to wait for sync during training
     if (num_procs > 1) {
       unique_lock<mutex> lock(sync_mtx);
-      sync_cv.wait(lock,[]{return !trainBlocked;});// 没有阻塞的时候才训练
+      sync_cv.wait(lock,[]{return !trainBlocked;});
     }
                                                               
     if (word_count - last_word_count > 10000) {
@@ -1663,7 +1663,7 @@ void myIntersectition(const vector<vertex_id_t>& v1,const vector<vertex_id_t>& v
             p2++;
             break;
         }
-        auto iter = lower_bound(long_v->begin()+(p1+offset/2),long_v->begin()+p1+last_p,(*short_v)[p2]); // 如果在 区间找到了
+        auto iter = lower_bound(long_v->begin()+(p1+offset/2),long_v->begin()+p1+last_p,(*short_v)[p2]);
         int t = iter - long_v->begin();
         if(*iter==(*short_v)[p2]){
             v_intersection.push_back((*short_v)[p2]);
@@ -1695,27 +1695,27 @@ __global__ void vector_cosine_similarity_kernel(
     float* d_results,
     int vector_length
     ){
-  int i = blockIdx.x; // 第 i 个向量对（ 2～29 )
-  int tid = threadIdx.x; // 线程号（0～blockDim.x -1 )
-  extern __shared__ float s_data[]; // 动态共享内存
+  int i = blockIdx.x; // index of the vector pair processed by this block
+  int tid = threadIdx.x; // thread index within the block
+  extern __shared__ float s_data[]; // dynamic shared memory buffer
   float* s_dot = s_data;
   float* s_A2 = &s_data[blockDim.x];
   float* s_B2 = &s_data[2 * blockDim.x];
 
-  // 初始化
+  // Initialize local accumulators
   float a = 0.0f, b = 0.0f;
   if(tid < vector_length) {
     a = d_A[i * vector_length + tid];
     b = d_B[i * vector_length + tid];
   }
-  // 计算点积平方和
+  // Compute dot product and squared magnitudes
   s_dot[tid] = a * b;
   s_A2[tid] = a * a;
   s_B2[tid] = b * b;
 
   __syncthreads();
 
-  // 规约求和（树装规约）
+  // Perform tree-style reduction inside the block
   for(int stride = blockDim.x / 2; stride > 0; stride >>= 1){
     if(tid < stride){
       s_dot[tid] += s_dot[tid + stride];
@@ -1724,7 +1724,7 @@ __global__ void vector_cosine_similarity_kernel(
     }
     __syncthreads();
   }
-  // 计算余弦相似度（仅由线程0完成）
+  // Thread 0 produces the cosine similarity result
   if(tid == 0) {
     float sum_dot = s_dot[0];
     float sum_A2 = s_A2[0];
@@ -1733,7 +1733,7 @@ __global__ void vector_cosine_similarity_kernel(
     float norm_A = sqrtf(sum_A2);
     float norm_B = sqrtf(sum_B2);
 
-    // 处理零向量
+    // Handle zero-valued vectors
     if (norm_A == 0 || norm_B == 0){
       d_results[i] = 0.0f;
     } else {
@@ -2339,15 +2339,15 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     Timer round_timer;  // Timer for entire training round
     Timer wait_timer;
     
-    // 等待游走产生训练资料
+    // Wait for the walking phase to produce training data
     unique_lock<mutex> lock(mtx);
     cv.wait(lock,[]{return hasResource;});
     double wait_time = wait_timer.duration();
     
     corpus_t corpus_data = taskq.pop();  // Get corpus data directly instead of file path
-    // 此时可以sample下一轮了
-    hasResource = false; // 坑位被释放
-    pauseWalk.store(false, std::memory_order_relaxed); // 继续游走
+    // A new sampling round can start now
+    hasResource = false; // release slot for the next producer
+    pauseWalk.store(false, std::memory_order_relaxed); // resume walking
     cv.notify_one();
     cout << "====== POP CORPUS DATA (size: " << corpus_data.size() << ") ===" << endl;
     train_iter++;
@@ -2362,17 +2362,8 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     pause_sync = true;
 
     if(train_iter >= init_round) {
-      pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
+      pauseWalk.store(true, std::memory_order_relaxed); // pause additional walks
     }
-    // if (num_procs == 1) {
-    //   if(train_iter >= init_round) {
-    //     pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
-    //   }
-    //   // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
-    // } else {
-    //   // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
-    // }
-    // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
     std::cout << std::endl;
     
     vertex_id_t eva_num = 0;
@@ -2431,18 +2422,12 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
       // printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
       MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
       MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EVA_COMM);
-      // if (num_procs == 1) {
-      //   pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
-      // } else {
-      //   // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
-      // }
-      // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
-      // 收敛了，每次减少的比例不多
+      // If convergence stalls, stop further synchronization and sampling
       float eva_num_ratio = (float)eva_num / last_eva_num;
       if( last_eva_num != 0 && eva_num_ratio> EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){
-        halt_sync = true; // 停止同步
-        stop_sampling_flag = true; // 停止采样
-        stop_train_flag = true;    // 停止训练
+        halt_sync = true;
+        stop_sampling_flag = true;
+        stop_train_flag = true;
       }
 
       last_eva_num = eva_num;

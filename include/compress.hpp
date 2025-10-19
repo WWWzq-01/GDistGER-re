@@ -10,15 +10,15 @@ class Bitmap {
 private:
     size_t bitSize = 0;
     const int EXPANDSIZE = 1;
-    // 获取位所在的字节索引
+    // Get the byte index for the target bit
     size_t getByteIndex(size_t bitIndex) const {
         return bitIndex / 8;
     }
-    // 获取位在字节中的位置
+    // Get the bit position inside the byte
     size_t getBitOffset(size_t bitIndex) const {
         return bitIndex % 8;
     }
-    // 扩展内存以容貌指定的位
+    // Grow storage to make sure the requested bit index is addressable
     void expandToFit(size_t bitIndex) {
         size_t requiredBytes = getByteIndex(bitIndex) + 1;
         if(data.size()<requiredBytes){
@@ -33,7 +33,7 @@ public:
     Bitmap(size_t bitNum){
         data.resize(bitNum/ sizeof(char) +1);
     }
-    // 设置指定位位1
+    // Set the specified bit to one
     void set(size_t bitIndex) {
         expandToFit(bitIndex);
         size_t byteIndex = getByteIndex(bitIndex);
@@ -50,7 +50,7 @@ public:
         this->bitSize = max(bitSize,bitIndex + 1);
     }
 
-    // 检查指定位是否为1
+    // Check whether the specified bit equals one
     bool check(size_t bitIndex)const {
         size_t byteIndex = getByteIndex(bitIndex);
         size_t bitOffset = getBitOffset(bitIndex);

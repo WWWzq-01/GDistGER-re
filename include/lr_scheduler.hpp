@@ -42,7 +42,7 @@ public:
   }
 private:
   double min_lr;
-  int T_max; // 周期
+  int T_max; // Total period length
 };
 
 class StepDecayLR : public LR {
@@ -57,8 +57,8 @@ public:
     }
 
 private:
-    float decay_factor;  // 衰减因子
-    int step_size;        // 步长
+    float decay_factor;
+    int step_size;
 };
 
 class CustomLR : public LR {
@@ -67,12 +67,11 @@ public:
 
     float get_lr() override {
         if (step % 5 == 0) {
-            initial_lr *= 0.8;  // 每 5 步衰减
+            initial_lr *= 0.8;
         }
         ++step;
         return initial_lr;
     }
 };
-
 
 

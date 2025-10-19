@@ -178,7 +178,7 @@ void myIntersectition(const vector<vertex_id_t>& v1,const vector<vertex_id_t>& v
             p2++;
             break;
         }
-        auto iter = lower_bound(long_v->begin()+(p1+offset/2),long_v->begin()+p1+last_p,(*short_v)[p2]); // 如果在 区间找到了
+        auto iter = lower_bound(long_v->begin()+(p1+offset/2),long_v->begin()+p1+last_p,(*short_v)[p2]);
         int t = iter - long_v->begin();
         if(*iter==(*short_v)[p2]){
             v_intersection.push_back((*short_v)[p2]);
@@ -503,7 +503,7 @@ void vertex_partition_LDG_sum(EdgeContainer<T>* graph_csr,vertex_id_t v_num, vec
     //     sort(partition_vertex_array[i].begin(),partition_vertex_array[i].end());
     // };
     
-    // for (vertex_id_t v_i = current_v_num; v_i < v_num; v_i++) {// 初始化q
+    // for (vertex_id_t v_i = current_v_num; v_i < v_num; v_i++) {
     //          q.push(idx_degree[v_i].first);	
     // }
 
@@ -775,7 +775,7 @@ void partition_relabel(const char* graph_path,const char* test_edges_path, verte
 
     cout << "partition finished\n";
    
-    vertex_id_t* vertex_array = new vertex_id_t[v_num]; // 从 new -> old 
+    vertex_id_t* vertex_array = new vertex_id_t[v_num];
     vertex_id_t* vertex_partition_begin = new vertex_id_t[partition_num];
     vertex_id_t* vertex_partition_end = new vertex_id_t[partition_num];
     vertex_id_t v_a_p = 0;

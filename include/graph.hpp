@@ -203,11 +203,11 @@ public:
 
     CoOccorCsr *co_occor = nullptr;
 
-    // 最近一次 distributed_execute 的消息生产和通信耗时（秒）
+    // Most recent message production and communication duration (seconds)
     double last_msg_producer_time = 0.0;
     double last_msg_comm_time = 0.0;
 
-    // 累计的消息生产与通信时间（秒）
+    // Accumulated message production and communication time (seconds)
     double total_msg_producer_time = 0.0;
     double total_msg_comm_time = 0.0;
 
@@ -902,8 +902,8 @@ public:
         delete []local_edges;
         // delete []local_edges;
         
-        /******************************************这下面都是和锁有关*************************************/
-        // 每台机器一个锁
+        /****************************************** lock management *********************************************/
+        // One lock array per machine
         send_locks = new std::mutex[partition_num];
         recv_locks = new std::mutex[partition_num];
 
@@ -1185,12 +1185,12 @@ public:
             //     int sz;
             //     MPI_Get_count(&prob_status, get_mpi_data_type<char>(), &sz);
             //
-            //     // 接收头信息，获取总数据大小
+            //     // Receive header information and obtain the total payload size
             //     size_t total_diff;
             //     MPI_Irecv(&total_diff, sizeof(total_diff), MPI_BYTE, src, Tag_Msg, MPI_COMM_WORLD, requests[src]);
             //     MPI_Wait(requests[src], MPI_STATUS_IGNORE);
             //
-            //     const size_t max_block_size = INT_MAX / sizeof(msg_t); // 每块的最大大小
+            //     const size_t max_block_size = INT_MAX / sizeof(msg_t);
             //     size_t received = 0;
             //
             //     while (received < total_diff)
@@ -1273,7 +1273,7 @@ public:
 
             // auto send_large_func = [&] (partition_id_t dst, size_t total_diff)
             // {
-            //     const size_t max_block_size = INT_MAX / sizeof(msg_t); // 每块的最大大小
+            //     const size_t max_block_size = INT_MAX / sizeof(msg_t);
             //     size_t sent = 0;
             //
             //     while (sent < total_diff)

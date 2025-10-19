@@ -592,7 +592,7 @@ void Train_SGNS_MPI()
                     MPI_Allreduce(&active_processes, &active_processes_global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
                     MPI_Allreduce(&word_count_actual, &word_count_actual_global, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
 
-                    // determine if full sync   getNumZero：获取有几个0
+                    // determine if full sync; getNumZero returns number of zeros
                     
                     // int sync_vocab_size = min((1 << getNumZeros(num_syncs)) * min_sync_words, vocab_size);
                     real progress = word_count_actual_global / (real)(iter * train_words + 1);
@@ -788,7 +788,7 @@ void Train_SGNS_MPI()
 
             
             int local_iter = iter;
-            ulonglong next_random = my_rank * (num_threads - 1) + id - 1; // global 计算计算线程 id ，
+            ulonglong next_random = my_rank * (num_threads - 1) + id - 1;
             ulonglong word_count = 0, last_word_count = 0;
             int sentence_length = 0, sentence_position = 0;
            
@@ -874,7 +874,7 @@ void Train_SGNS_MPI()
             }
             // printf("p%d t%d alloc\n",my_rank,id);
             while (1)
-            { // 计算时间
+            {
                 modet.restart();
                 while (!compute_go)
                 {
@@ -897,7 +897,7 @@ void Train_SGNS_MPI()
                 }
 
                
-                // 把词读到句子中
+                // Insert words into sentence
                 // if (sentence_length == 0)
                 while(sentence_length == 0)
                 {
@@ -988,7 +988,7 @@ void Train_SGNS_MPI()
                             real ratio = (sample * train_words) / (*cn_vocab)[w];
                             real ran = sqrtf(ratio) + ratio;
                             next_random = next_random * (ulonglong)25214903917 + 11;
-                            if (ran < (next_random & 0xFFFF) / 65536.f) // 拒绝，重新采样
+                            if (ran < (next_random & 0xFFFF) / 65536.f)
                                 continue;
                         }
                         sen2[sentence_length2] = w;

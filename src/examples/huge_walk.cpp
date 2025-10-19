@@ -145,14 +145,14 @@ int main(int argc, char **argv)
         // printf("[p%u][WALK EXECUTION] Total: %lf s, Pure walk: %lf s, Other: %lf s\n", 
         //        graph.get_local_partition_id(), sum_time, walk_time, graph.other_time);
         
-        // // 使用内存管道，无磁盘I/O
+        // // Use in-memory pipeline (no disk I/O)
         // if (!opt.output_path.empty()) {
         //     printf("[ %d ] *** USING MEMORY PIPELINE (NO DISK I/O) *** \n", my_rank);
         // }
     }
     printf("> [p%d RANDOM WALKING TIME:] %lf \n",get_mpi_rank(), timer.duration());
 
-    // * 关闭任务队列
+    // * Close the task queue
     graph.out_queue.closeQueue();
 
     if(get_mpi_rank()==0){
