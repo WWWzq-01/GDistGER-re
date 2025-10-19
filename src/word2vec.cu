@@ -35,44 +35,6 @@ using std::string;
 using std::cout;
 using std::endl;
 
-namespace {
-
-void log_host_allocation(const char* tag, size_t bytes)
-{
-    if (my_rank != 0) {
-        return;
-    }
-    printf("[MEM][HOST] %s -> %.2f MB\n", tag, bytes / (1024.0 * 1024.0));
-}
-
-void log_host_growth(const char* tag, size_t old_bytes, size_t new_bytes)
-{
-    if (my_rank != 0) {
-        return;
-    }
-    printf("[MEM][HOST] %s resize %.2f MB -> %.2f MB\n",
-           tag,
-           old_bytes / (1024.0 * 1024.0),
-           new_bytes / (1024.0 * 1024.0));
-}
-
-void log_host_release(const char* tag, size_t bytes = 0)
-{
-    if (my_rank != 0) {
-        return;
-    }
-    if (bytes > 0) {
-        printf("[MEM][HOST] %s freed %.2f MB\n", tag, bytes / (1024.0 * 1024.0));
-    } else {
-        printf("[MEM][HOST] %s freed\n", tag);
-    }
-}
-
-size_t vocab_code_total_bytes = 0;
-size_t vocab_point_total_bytes = 0;
-
-} // namespace
-
 #define DELTA_R  100
 #define MAX_STRING 100
 #define EXP_TABLE_SIZE 1000
@@ -705,14 +667,11 @@ __global__ void cbow_kernel(int window, int layer1_size, int negative, int hs, i
 void InitVocabStructCUDA()
 {
   vocab_codelen = (int *)malloc((vocab_size + 1) * sizeof(int));
-  log_host_allocation("vocab codelen host", (vocab_size + 1) * sizeof(int));
   vocab_codelen[0] = 0;
   for (int i = 1; i < vocab_size + 1; i++) 
     vocab_codelen[i] = vocab_codelen[i-1] + vocab[i-1].codelen;
   vocab_point = (int *)malloc(vocab_codelen[vocab_size] * sizeof(int));
   vocab_code = (char *)malloc(vocab_codelen[vocab_size] * sizeof(char));
-  log_host_allocation("vocab point host", vocab_codelen[vocab_size] * sizeof(int));
-  log_host_allocation("vocab code host", vocab_codelen[vocab_size] * sizeof(char));
 
   checkCUDAerr(cudaMalloc((void **)&d_vocab_codelen, (vocab_size + 1) * sizeof(int)));
   checkCUDAerr(cudaMalloc((void **)&d_vocab_point, vocab_codelen[vocab_size] * sizeof(int)));
@@ -736,7 +695,6 @@ void InitUnigramTable() {
   double train_words_pow = 0;
   double d1, power = 0.75;
   table = (int *)malloc(table_size * sizeof(int));
-  log_host_allocation("unigram table host", table_size * sizeof(int));
   for (a = 0; a < vocab_size; a++) train_words_pow += pow(vocab[a].cn, power);
   i = 0;
   d1 = pow(vocab[i].cn, power) / train_words_pow;
@@ -823,11 +781,8 @@ int AddWordToVocab(char *word) {
 
   step_timer.restart();
   if (vocab_size + 2 >= vocab_max_size) {
-    size_t old_bytes = (size_t)vocab_max_size * sizeof(struct vocab_word);
     vocab_max_size += 1000;
-    size_t new_bytes = (size_t)vocab_max_size * sizeof(struct vocab_word);
     vocab = (struct vocab_word *)realloc(vocab, vocab_max_size * sizeof(struct vocab_word));
-    log_host_growth("vocab array", old_bytes, new_bytes);
   }
   double realloc_time = step_timer.duration();
 
@@ -875,18 +830,11 @@ void SortVocab() {
     }
   }
   vocab = (struct vocab_word *)realloc(vocab, (vocab_size + 1) * sizeof(struct vocab_word));
-  log_host_allocation("vocab shrink", (size_t)(vocab_size + 1) * sizeof(struct vocab_word));
   // Allocate memory for the binary tree construction
-  vocab_code_total_bytes = 0;
-  vocab_point_total_bytes = 0;
   for (size_t a = 0; a < static_cast<size_t>(vocab_size); a++) {
     vocab[a].code = (char *)calloc(MAX_CODE_LENGTH, sizeof(char));
     vocab[a].point = (int *)calloc(MAX_CODE_LENGTH, sizeof(int));
-    vocab_code_total_bytes += MAX_CODE_LENGTH * sizeof(char);
-    vocab_point_total_bytes += MAX_CODE_LENGTH * sizeof(int);
   }
-  log_host_allocation("vocab code path total", vocab_code_total_bytes);
-  log_host_allocation("vocab point path total", vocab_point_total_bytes);
 }
 
 // Reduces the vocabulary by removing infrequent tokens
@@ -919,9 +867,6 @@ void CreateBinaryTree() {
   long long *count = (long long *)calloc(tree_array_len, sizeof(long long));
   long long *binary = (long long *)calloc(tree_array_len, sizeof(long long));
   long long *parent_node = (long long *)calloc(tree_array_len, sizeof(long long));
-  log_host_allocation("huffman count array", tree_array_len * sizeof(long long));
-  log_host_allocation("huffman binary array", tree_array_len * sizeof(long long));
-  log_host_allocation("huffman parent array", tree_array_len * sizeof(long long));
   for (a = 0; a < vocab_size; a++) count[a] = vocab[a].cn;
   for (a = vocab_size; a < vocab_size * 2; a++) count[a] = 1e15;
   pos1 = vocab_size - 1;
@@ -977,11 +922,8 @@ void CreateBinaryTree() {
     }
   }
   free(count);
-  log_host_release("huffman count array", tree_array_len * sizeof(long long));
   free(binary);
-  log_host_release("huffman binary array", tree_array_len * sizeof(long long));
   free(parent_node);
-  log_host_release("huffman parent array", tree_array_len * sizeof(long long));
 }
 
 void LearnVocabFromTrainFile() {
@@ -2715,9 +2657,6 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
   vocab = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
   vocab_hash = (long long *)calloc(vocab_hash_size, sizeof(long long));
   expTable = (float *)malloc((EXP_TABLE_SIZE + 1) * sizeof(float));
-  log_host_allocation("vocab array", (size_t)vocab_max_size * sizeof(struct vocab_word));
-  log_host_allocation("vocab hash", (size_t)vocab_hash_size * sizeof(long long));
-  log_host_allocation("expTable host", (size_t)(EXP_TABLE_SIZE + 1) * sizeof(float));
 
   for (i = 0; i < EXP_TABLE_SIZE; i++) {
     expTable[i] = exp((i / (float)EXP_TABLE_SIZE * 2 - 1) * MAX_EXP); // Precompute the exp() table
@@ -2733,44 +2672,24 @@ int train_corpus_cuda(int argc, char **argv,const vector<vertex_id_t>& degrees,S
 
   printf("[ %d ] [Sync Time Spend: %f s]\n",my_rank,sync_spend_time);
   // memory free
-  size_t vocab_codelen_bytes = 0;
-  size_t vocab_point_bytes = 0;
-  size_t vocab_code_bytes = 0;
-  if (vocab_codelen != nullptr)
-  {
-      vocab_codelen_bytes = (vocab_size + 1) * sizeof(int);
-      size_t vocab_offset = static_cast<size_t>(vocab_codelen[vocab_size]);
-      vocab_point_bytes = vocab_offset * sizeof(int);
-      vocab_code_bytes = vocab_offset * sizeof(char);
-  }
   free(table);
-  log_host_release("unigram table host", static_cast<size_t>(table_size) * sizeof(int));
   free(syn0);
-  log_host_release("syn0 host copy", static_cast<size_t>(vocab_size) * layer1_size * sizeof(float));
   free(syn1);
-  log_host_release("syn1 host copy", static_cast<size_t>(vocab_size) * layer1_size * sizeof(float));
   free(syn1neg);
-  log_host_release("syn1neg host copy", static_cast<size_t>(vocab_size) * layer1_size * sizeof(float));
   free(vocab);
-  log_host_release("vocab array", static_cast<size_t>(vocab_size + 1) * sizeof(struct vocab_word));
   free(vocab_hash);
-  log_host_release("vocab hash", static_cast<size_t>(vocab_hash_size) * sizeof(long long));
   free(expTable);
-  log_host_release("expTable host", static_cast<size_t>(EXP_TABLE_SIZE + 1) * sizeof(float));
   if (vocab_codelen != nullptr)
   {
       free(vocab_codelen);
-      log_host_release("vocab codelen host", vocab_codelen_bytes);
   }
   if (vocab_point != nullptr)
   {
       free(vocab_point);
-      log_host_release("vocab point host", vocab_point_bytes);
   }
   if (vocab_code != nullptr)
   {
       free(vocab_code);
-      log_host_release("vocab code host", vocab_code_bytes);
   }
   cudaFree(d_expTable);
   free(last_emb);
