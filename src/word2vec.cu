@@ -81,9 +81,13 @@ size_t vocab_point_total_bytes = 0;
 #define MAX_CODE_LENGTH 40
 
 #define EVALUATION_NEIGHBOUR_NUM 30
-#define NODE_TRAINING_CONVERGE_THRESHOLD 0.65
-#define NODE_TRAINING_REACTIVATE_THRESHOLD 0.65
-#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.9
+#define NODE_TRAINING_CONVERGE_THRESHOLD 0.85
+#define NODE_TRAINING_REACTIVATE_THRESHOLD 0.85
+#define TRAIN_MIN_ROUNDS 3
+#define TRAIN_MAX_ROUNDS 10
+#define EVA_NUM_RATIO_THRESHOLD 0.9f
+#define GLOBAL_EVA_RATIO_THRESHOLD 0.05f
+#define GLOBAL_REACTIVATE_RATIO_THRESHOLD 0.05f
 
 #define MAX_SENTENCE 15000
 #define checkCUDAerr(err) {\
@@ -2760,21 +2764,40 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
       printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
       MPI_Allreduce(MPI_IN_PLACE, vertex_walker_stop_flag.data(),vertex_walker_stop_flag.size(), MPI_INT, MPI_MAX, MPI_EVA_COMM);
       MPI_Allreduce(MPI_IN_PLACE, &eva_num, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM , MPI_EVA_COMM);
-      // if (num_procs == 1) {
-      //   pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
-      // } else {
-      //   // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
-      // }
-      // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
-      // 收敛了，每次减少的比例不多
-      float eva_num_ratio = (float)eva_num / last_eva_num;
-      printf("[ %d ] last_eva_num: %u current_eva_num: %u ratio: %f \n",my_rank,last_eva_num,eva_num,eva_num_ratio);
-      if( last_eva_num != 0 && eva_num_ratio> EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){
+      vertex_id_t global_reactivated_count = static_cast<vertex_id_t>(reactivated_count);
+      vertex_id_t global_inactive_count = static_cast<vertex_id_t>(inactive_node_count);
+      MPI_Allreduce(MPI_IN_PLACE, &global_reactivated_count, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_EVA_COMM);
+      MPI_Allreduce(MPI_IN_PLACE, &global_inactive_count, 1, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_EVA_COMM);
+      
+      float eva_num_ratio = (last_eva_num == 0) ? 0.0f : static_cast<float>(eva_num) / static_cast<float>(last_eva_num);
+      double global_eva_ratio = (vocab_size == 0) ? 0.0 :
+        static_cast<double>(eva_num) / static_cast<double>(vocab_size);
+      double global_reactivation_ratio = (global_inactive_count == 0) ? 0.0 :
+        static_cast<double>(global_reactivated_count) / static_cast<double>(global_inactive_count);
+      
+      bool min_rounds_met = train_iter >= TRAIN_MIN_ROUNDS;
+      bool max_rounds_hit = (TRAIN_MAX_ROUNDS > 0) && (train_iter >= TRAIN_MAX_ROUNDS);
+      bool eva_drop_poor = (last_eva_num != 0) && (eva_num_ratio > EVA_NUM_RATIO_THRESHOLD);
+      bool eva_ratio_small = global_eva_ratio < GLOBAL_EVA_RATIO_THRESHOLD;
+      bool reactivate_quiet = global_reactivation_ratio < GLOBAL_REACTIVATE_RATIO_THRESHOLD;
+      
+      printf("[ %d ]Iter %d Evaluate Num: %d Ratio(prev): %f GlobalRatio: %.4f ReactivateRatio: %.4f Time: %f s\n",
+             my_rank, train_iter, eva_num, eva_num_ratio, global_eva_ratio, global_reactivation_ratio, eva_timer.duration());
+      printf("[ %d ]Iter %d StopCheck => min_round:%d max_round:%d drop_bad:%d eva_small:%d reactivate_quiet:%d\n",
+             my_rank, train_iter, min_rounds_met, max_rounds_hit, eva_drop_poor, eva_ratio_small, reactivate_quiet);
+      
+      if(max_rounds_hit){
+        halt_sync = true;
+        stop_sampling_flag = true;
+        stop_train_flag = true;
+        printf("[ %d ]Iter %d Training stopped due to reaching max rounds (%d)\n", my_rank, train_iter, TRAIN_MAX_ROUNDS);
+      } else if(min_rounds_met && reactivate_quiet && (eva_ratio_small || eva_drop_poor)){
         halt_sync = true; // 停止同步
         stop_sampling_flag = true; // 停止采样
         stop_train_flag = true;    // 停止训练
+        printf("[ %d ]Iter %d Training stopped (eva_small:%d eva_drop_poor:%d reactivate_quiet:%d)\n",
+               my_rank, train_iter, eva_ratio_small, eva_drop_poor, reactivate_quiet);
       }
-      printf("[ %d ]Iter %d Evaluate Num: %d Ratio: %f Time: %f s\n",my_rank,train_iter,eva_num,eva_num_ratio,eva_timer.duration());
       double eval_time = eva_timer.duration();
       double total_round_time = round_timer.duration();
       
