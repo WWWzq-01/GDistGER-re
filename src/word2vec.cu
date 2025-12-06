@@ -82,7 +82,8 @@ size_t vocab_point_total_bytes = 0;
 
 #define EVALUATION_NEIGHBOUR_NUM 30
 #define NODE_TRAINING_CONVERGE_THRESHOLD 0.65
-#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.7
+#define NODE_TRAINING_REACTIVATE_THRESHOLD 0.65
+#define EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO 0.9
 
 #define MAX_SENTENCE 15000
 #define checkCUDAerr(err) {\
@@ -2650,20 +2651,31 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
     
     vertex_id_t eva_num = 0;
     printf("init_round: %d\n",init_round);
+    // TODO: set a args to control whether reactivate inactive nodes
+    bool reactivate_flag = true;
     if(train_iter >= init_round){
       printf("[ %d ] evaluation start (with synchronized embeddings)\n", my_rank);
       
       Timer eva_timer;
       // Step 1: Collect all nodes that need evaluation
       std::vector<vertex_id_t> nodes_to_evaluate;
+      std::vector<vertex_id_t> nodes_inactive;
+      size_t evaluated_node_count = 0;
+      size_t inactive_node_count = 0;
+      double rank_converged_ratio = 0.0;
+      double rank_reactivated_ratio = 0.0;
       for(vertex_id_t v = part_vertex_num * my_rank; v < part_vertex_num * (my_rank + 1) && v < vocab_size; v++){
         if(vertex_walker_stop_flag[v] == 0){
           nodes_to_evaluate.push_back(v);
+        } else if(reactivate_flag){
+          nodes_inactive.push_back(v);
         }
       }
+      evaluated_node_count = nodes_to_evaluate.size();
+      inactive_node_count = nodes_inactive.size();
       
       printf("[ %d ] Found %zu nodes to evaluate\n", my_rank, nodes_to_evaluate.size());
-      
+      int converged_count = 0;
       if(!nodes_to_evaluate.empty()){
         // Step 2: Batch process all nodes with configurable implementation
         std::vector<float> similarities;
@@ -2681,7 +2693,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
         }
         
         // Step 3: Apply results and count non-converged nodes
-        int converged_count = 0;
+        converged_count = 0;
         for(size_t i = 0; i < nodes_to_evaluate.size(); i++){
           vertex_id_t v = nodes_to_evaluate[i];
           float s = similarities[i];
@@ -2699,8 +2711,50 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
         
         printf("[ %d ] Batch evaluation completed: %d converged, %d non-converged\n", 
                my_rank, converged_count, eva_num);
+        rank_converged_ratio = nodes_to_evaluate.empty() ? 0.0 :
+          static_cast<double>(converged_count) / static_cast<double>(nodes_to_evaluate.size());
       }
-      
+      int reactivated_count = 0;
+      if(!nodes_inactive.empty()){
+        // evaluate to jusify whether reactivate inactive nodes
+        // get the number of inactive nodes whose similarity < NODE_TRAINING_REACTIVATE_THRESHOLD
+        reactivated_count = 0;
+        std::vector<float> inactive_similarities;
+        if(use_gpu_direct_indexing) {
+          // NEW: GPU-side direct indexing (eliminates memory copy bottleneck)
+          printf("[ %d ] Reactivation: Using GPU Direct Indexing optimization\n", my_rank);
+          inactive_similarities = batch_node_neighbor_direct_index(
+            nodes_inactive, csr, batch_size, use_optimized_direct_kernel);
+        } else {
+          // ORIGINAL: Memory copy based batch processing (preserved for comparison)
+          printf("[ %d ] Reactivation: Using original memory-copy batch processing\n", my_rank);
+          inactive_similarities = batch_node_neighbor_average_cos_sim_chunked(
+            nodes_inactive, csr, d_A_batch, d_B_batch, d_results_batch, batch_size);
+        }
+        for(size_t i = 0; i < nodes_inactive.size(); i++){
+          vertex_id_t v = nodes_inactive[i];
+          float s = inactive_similarities[i];
+          
+          // Debug output for first few nodes
+          if(v < 10) printf("Inactive Node %d similarity: %f\n", v, s);
+          
+          if(s < NODE_TRAINING_REACTIVATE_THRESHOLD){
+            vertex_walker_stop_flag[v] = 0; // reactivate
+            reactivated_count++;
+            eva_num++;
+          } 
+        }
+        printf("[ %d ] Reactivation completed: %d nodes reactivated\n", my_rank, reactivated_count);
+        rank_reactivated_ratio = nodes_inactive.empty() ? 0.0 :
+          static_cast<double>(reactivated_count) / static_cast<double>(nodes_inactive.size());
+      } else {
+        printf("[ %d ] Skipping evaluation for %zu inactive nodes\n", my_rank, nodes_inactive.size());
+      }
+      printf("[ %d ] Iter %d rank summary: converge %d/%zu (%.4f), reactivate %d/%zu (%.4f)\n",
+             my_rank, train_iter,
+             converged_count, evaluated_node_count, rank_converged_ratio,
+             reactivated_count, inactive_node_count, rank_reactivated_ratio);
+      printf("[ %d ] Total reactivated nodes: %d\n", my_rank, reactivated_count);
       printf("[ %d ] evaluation finished\n", my_rank);
       
       printf("[ %d ] vertex_walker_stop_flag size: %lu\n",my_rank,vertex_walker_stop_flag.size());
@@ -2714,6 +2768,7 @@ void TrainModel(SyncQueue& taskq,myEdgeContainer*csr, const TrainingConfig& conf
       // pauseWalk.store(true, std::memory_order_relaxed); // 打断游走
       // 收敛了，每次减少的比例不多
       float eva_num_ratio = (float)eva_num / last_eva_num;
+      printf("[ %d ] last_eva_num: %u current_eva_num: %u ratio: %f \n",my_rank,last_eva_num,eva_num,eva_num_ratio);
       if( last_eva_num != 0 && eva_num_ratio> EVALUATION_NEIGHBOUR_NUM_CONVERGE_RATIO ){
         halt_sync = true; // 停止同步
         stop_sampling_flag = true; // 停止采样
